@@ -14,10 +14,18 @@ from rich.panel import Panel
 from rich.table import Table
 
 from srvp import __version__
+from srvp.automation import (
+    detect_port_conflicts,
+    find_srvp_file,
+    generate_power_udev_rule,
+    generate_shell_hook,
+)
 from srvp.config import (
     ProfileConflictError,
     ProfilesFile,
+    export_profiles_yaml,
     load_profiles,
+    parse_imported_profiles,
     resolve_config_path,
     save_profiles,
     update_profiles,
@@ -214,6 +222,10 @@ def cmd_list(ctx: typer.Context) -> None:
         extras: list[str] = []
         if prof.docker.enabled or prof.docker.containers or prof.docker.compose_stacks:
             extras.append("docker")
+        if prof.podman.containers or prof.podman.compose_stacks:
+            extras.append("podman")
+        if prof.libvirt.vms:
+            extras.append("libvirt")
         if prof.android.adb_server:
             extras.append("adb")
         if prof.esp32_serial.enabled:
@@ -523,6 +535,286 @@ def cmd_polkit_setup(
         console.print(f"[bold green]Wrote Polkit rules to:[/bold green] {out_path}")
     else:
         typer.echo(rules_text, nl=not rules_text.endswith("\n"))
+
+
+@app.command("auto")
+def cmd_auto(
+    ctx: typer.Context,
+    directory: Annotated[
+        Path | None,
+        typer.Option("--dir", "-d", help="Directory to search upward from for a .srvp file."),
+    ] = None,
+    shell_hook: Annotated[
+        str | None,
+        typer.Option(
+            "--shell-hook",
+            help="Output shell prompt hook snippet for automatic directory switching (bash, zsh, fish).",
+        ),
+    ] = None,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", "-q", help="Suppress output when no switch is needed."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", "-n", help="Preview transition without executing."),
+    ] = False,
+) -> None:
+    """Automatically switch profiles based on a local `.srvp` file, or print a shell prompt hook."""
+    if shell_hook:
+        hook_text = generate_shell_hook(shell_hook)
+        typer.echo(hook_text, nl=not hook_text.endswith("\n"))
+        return
+
+    cli_ctx: CliContext = ctx.obj
+    found = find_srvp_file(directory)
+    if found is None:
+        if not quiet:
+            console.print("[dim]No .srvp file found in current or parent directories.[/dim]")
+        return
+
+    srvp_path, target_profile = found
+    profiles_file = cli_ctx.load_or_fail()
+    if target_profile not in profiles_file.profiles:
+        console.print(
+            f"[bold red]Error:[/bold red] Profile '{target_profile}' (from {srvp_path}) is not defined in {cli_ctx.config_path}."
+        )
+        raise typer.Exit(code=1)
+
+    state_mgr = StateManager(cli_ctx.state_path)
+    current_active = state_mgr.load().active_profile
+    if current_active == target_profile and not dry_run:
+        if not quiet:
+            console.print(
+                f"[dim]Profile '{target_profile}' (from {srvp_path}) is already active.[/dim]"
+            )
+        return
+
+    engine = ProfileEngine(
+        config=profiles_file,
+        state_manager=state_mgr,
+        executor=cli_ctx.build_executor(override_dry_run=dry_run),
+    )
+    res = engine.switch_profile(target_profile)
+    if not quiet or not res.success:
+        _render_transition_result(res)
+    if not res.success:
+        raise typer.Exit(code=1)
+
+
+@app.command("doctor")
+def cmd_doctor(
+    ctx: typer.Context,
+    profile: Annotated[
+        str | None,
+        typer.Option(
+            "--profile",
+            "-p",
+            help="Check port conflicts for a specific profile (checks all profiles if omitted).",
+            autocompletion=complete_profile_names,
+        ),
+    ] = None,
+) -> None:
+    """Check for TCP port conflicts and configuration issues across profiles."""
+    cli_ctx: CliContext = ctx.obj
+    profiles_file = cli_ctx.load_or_fail()
+    executor = cli_ctx.build_executor()
+    engine = ProfileEngine(
+        config=profiles_file,
+        state_manager=StateManager(cli_ctx.state_path),
+        executor=executor,
+    )
+
+    warnings = engine.validate_config()
+    target_names = [profile] if profile else list(profiles_file.profiles.keys())
+    for name in target_names:
+        if name not in profiles_file.profiles:
+            console.print(f"[bold red]Error:[/bold red] Unknown profile '{name}'.")
+            raise typer.Exit(code=1)
+
+    table = Table(title="srvp Doctor — Port Conflict & Readiness Report")
+    table.add_column("Profile", style="bold cyan")
+    table.add_column("Status")
+    table.add_column("Details")
+
+    has_conflicts = False
+    for name in target_names:
+        prof = profiles_file.profiles[name]
+        conflicts = detect_port_conflicts(prof, executor)
+        if conflicts:
+            has_conflicts = True
+            detail_str = ", ".join(
+                f":{c.port} required by {c.expected_for} is bound by {c.bound_by_process}"
+                + (f" (PID {c.bound_by_pid})" if c.bound_by_pid else "")
+                for c in conflicts
+            )
+            table.add_row(name, "[bold red]✗ PORT CONFLICT[/bold red]", detail_str)
+        else:
+            table.add_row(name, "[bold green]✓ READY[/bold green]", "No conflicting ports detected")
+
+    console.print(table)
+    if warnings:
+        console.print("[bold yellow]Configuration warnings:[/bold yellow]")
+        for w in warnings:
+            console.print(f"  [yellow]•[/yellow] {w}")
+
+    if has_conflicts or warnings:
+        raise typer.Exit(code=1)
+
+
+@app.command("power-check")
+def cmd_power_check(
+    ctx: typer.Context,
+    threshold: Annotated[
+        int,
+        typer.Option(
+            "--threshold",
+            "-t",
+            help="Battery percentage threshold at or below which to switch when on battery.",
+        ),
+    ] = 20,
+    target_profile: Annotated[
+        str,
+        typer.Option(
+            "--target-profile",
+            "-p",
+            help="Profile to activate when unplugged and below threshold.",
+            autocompletion=complete_profile_names,
+        ),
+    ] = "idle",
+    udev_rule: Annotated[
+        bool,
+        typer.Option(
+            "--udev-rule",
+            help="Output a udev rule snippet for automatic power-triggered switching.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", "-n", help="Preview transition without executing."),
+    ] = False,
+) -> None:
+    """Check battery/AC power status and switch to the idle/battery-saver profile if below threshold."""
+    if udev_rule:
+        udev_text = generate_power_udev_rule(threshold=threshold, target_profile=target_profile)
+        typer.echo(udev_text, nl=not udev_text.endswith("\n"))
+        return
+
+    cli_ctx: CliContext = ctx.obj
+    executor = cli_ctx.build_executor(override_dry_run=dry_run)
+    bat = executor.get_battery_status()
+    if not bat.present:
+        console.print("[dim]No laptop battery detected on this system.[/dim]")
+        return
+
+    power_str = "AC Plugged In" if bat.power_plugged else "On Battery"
+    console.print(f"Battery Status: [bold]{bat.percent:.1f}%[/bold] ({power_str})")
+
+    if not bat.power_plugged and bat.percent <= float(threshold):
+        profiles_file = cli_ctx.load_or_fail()
+        if target_profile not in profiles_file.profiles:
+            console.print(
+                f"[bold red]Error:[/bold red] Target profile '{target_profile}' not found."
+            )
+            raise typer.Exit(code=1)
+        console.print(
+            f"[bold yellow]Battery ({bat.percent:.1f}%) <= {threshold}% on battery power — "
+            f"switching to '{target_profile}'...[/bold yellow]"
+        )
+        engine = ProfileEngine(
+            config=profiles_file,
+            state_manager=StateManager(cli_ctx.state_path),
+            executor=executor,
+        )
+        res = engine.switch_profile(target_profile)
+        _render_transition_result(res)
+    else:
+        console.print("[green]Power state above threshold; no profile switch needed.[/green]")
+
+
+@app.command("export")
+def cmd_export(
+    ctx: typer.Context,
+    profile_name: Annotated[
+        str,
+        typer.Argument(
+            help="Name of the profile to export.",
+            autocompletion=complete_profile_names,
+        ),
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output", "-o", help="Optional YAML file path to write the exported profile."
+        ),
+    ] = None,
+) -> None:
+    """Export a profile definition to a standalone shareable YAML file or stdout."""
+    cli_ctx: CliContext = ctx.obj
+    profiles_file = cli_ctx.load_or_fail()
+    if profile_name not in profiles_file.profiles:
+        console.print(f"[bold red]Error:[/bold red] Profile '{profile_name}' not found.")
+        raise typer.Exit(code=1)
+
+    yaml_text = export_profiles_yaml(profiles_file, [profile_name])
+    if output is not None:
+        out_path = Path(output).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(yaml_text, encoding="utf-8")
+        console.print(f"[bold green]Exported profile '{profile_name}' to:[/bold green] {out_path}")
+    else:
+        typer.echo(yaml_text, nl=not yaml_text.endswith("\n"))
+
+
+@app.command("import")
+def cmd_import(
+    ctx: typer.Context,
+    file_path: Annotated[
+        Path,
+        typer.Argument(help="Path to the exported profile YAML file to import."),
+    ],
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Overwrite existing profiles with the same name."),
+    ] = False,
+) -> None:
+    """Validate and merge a shareable profile YAML pack into profiles.yaml."""
+    cli_ctx: CliContext = ctx.obj
+    resolved_in = Path(file_path).expanduser().resolve()
+    if not resolved_in.exists():
+        console.print(f"[bold red]Error:[/bold red] Import file not found: {resolved_in}")
+        raise typer.Exit(code=1)
+
+    try:
+        imported = parse_imported_profiles(resolved_in.read_text(encoding="utf-8"))
+    except Exception as exc:
+        console.print(f"[bold red]Invalid profile import file:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    def _merge_imported(current: ProfilesFile) -> None:
+        collisions = [name for name in imported.profiles if name in current.profiles]
+        if collisions and not force:
+            raise ProfileConflictError(f"Profile(s) {', '.join(collisions)} already exist.")
+        for name, prof in imported.profiles.items():
+            current.profiles[name] = prof
+
+    try:
+        update_profiles(
+            cli_ctx.config_path,
+            _merge_imported,
+            initial=build_starter_profiles(),
+        )
+    except ProfileConflictError as exc:
+        console.print(
+            f"[bold yellow]{escape(str(exc))}[/bold yellow] Pass [bold]--force[/bold] to overwrite them."
+        )
+        raise typer.Exit(code=1) from exc
+
+    saved = resolve_config_path(cli_ctx.config_path)
+    console.print(
+        f"[bold green]Imported {len(imported.profiles)} profile(s) "
+        f"({', '.join(imported.profiles.keys())}) into:[/bold green] {saved}"
+    )
 
 
 def main() -> None:

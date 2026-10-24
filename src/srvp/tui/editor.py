@@ -16,6 +16,8 @@ from srvp.config import (
     DockerConfig,
     Esp32SerialConfig,
     HooksConfig,
+    LibvirtConfig,
+    PodmanConfig,
     ProfileConfig,
     SystemdConfig,
     normalize_unit_name,
@@ -839,6 +841,24 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
                 )
                 yield Button("Select...", id="btn-pick-compose", variant="primary")
 
+            yield Label("Podman Containers (comma-separated):", classes="field-label")
+            with Horizontal(classes="input-with-picker"):
+                yield Input(
+                    value=", ".join(p.podman.containers),
+                    placeholder="e.g., podman-redis, podman-keycloak",
+                    id="podman-containers",
+                )
+                yield Button("Select...", id="btn-pick-podman", variant="primary")
+
+            yield Label("Libvirt / KVM Virtual Machines (comma-separated):", classes="field-label")
+            with Horizontal(classes="input-with-picker"):
+                yield Input(
+                    value=", ".join(p.libvirt.vms),
+                    placeholder="e.g., ubuntu-test-vm",
+                    id="libvirt-vms",
+                )
+                yield Button("Select...", id="btn-pick-libvirt", variant="primary")
+
             yield Checkbox(
                 "Start Android ADB Server (adb start-server)",
                 value=p.android.adb_server,
@@ -904,6 +924,18 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
                 input_id="#docker-containers",
                 category="docker_container",
                 title="Select Standalone Docker Containers to Start",
+            )
+        elif bid == "btn-pick-podman":
+            self._open_service_picker(
+                input_id="#podman-containers",
+                category="podman_container",
+                title="Select Standalone Podman Containers to Start",
+            )
+        elif bid == "btn-pick-libvirt":
+            self._open_service_picker(
+                input_id="#libvirt-vms",
+                category="libvirt_vm",
+                title="Select Libvirt / KVM Virtual Machines to Start",
             )
         elif bid == "btn-pick-compose":
             self._open_compose_picker()
@@ -1016,6 +1048,8 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
         stop_units = _split_csv(self.query_one("#systemd-stopped", Input).value)
         docker_enabled = self.query_one("#docker-enabled", Checkbox).value
         docker_containers = _split_csv(self.query_one("#docker-containers", Input).value)
+        podman_containers = _split_csv(self.query_one("#podman-containers", Input).value)
+        libvirt_vms = _split_csv(self.query_one("#libvirt-vms", Input).value)
         adb_enabled = self.query_one("#adb-enabled", Checkbox).value
         esp32_enabled = self.query_one("#esp32-enabled", Checkbox).value
         pre_start = self._resolve_hook_commands("pre_start")
@@ -1025,6 +1059,7 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
             compose_stacks = self._resolve_compose_stacks()
             new_profile = ProfileConfig(
                 description=desc,
+                ports=list(self.initial_profile.ports),
                 systemd=SystemdConfig(
                     system=sys_units,
                     user=usr_units,
@@ -1035,6 +1070,11 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
                     containers=docker_containers,
                     compose_stacks=compose_stacks,
                 ),
+                podman=PodmanConfig(
+                    containers=podman_containers,
+                    compose_stacks=self.initial_profile.podman.compose_stacks,
+                ),
+                libvirt=LibvirtConfig(vms=libvirt_vms),
                 android=AndroidConfig(adb_server=adb_enabled),
                 esp32_serial=Esp32SerialConfig(
                     enabled=esp32_enabled,

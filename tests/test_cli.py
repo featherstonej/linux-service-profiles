@@ -153,3 +153,52 @@ def test_transition_result_escapes_untrusted_rich_markup(
     assert "echo '[/red]'" in rendered
     assert "error [/red]" in rendered
     assert "unit[/red]" in rendered
+
+
+def test_cli_phase7_export_import_auto_doctor_power(tmp_path: Path) -> None:
+    cfg = tmp_path / "profiles.yaml"
+    st = tmp_path / "state.json"
+    base_args = ["--config", str(cfg), "--state", str(st), "--mock"]
+
+    runner.invoke(app, [*base_args, "init"])
+
+    # 1. export & import
+    exported_file = tmp_path / "web-db-pack.yaml"
+    r_exp = runner.invoke(app, [*base_args, "export", "web-db", "--output", str(exported_file)])
+    assert r_exp.exit_code == 0
+    assert exported_file.exists()
+
+    # Modify exported file to define a new profile 'team-stack' and import it
+    pack_text = exported_file.read_text(encoding="utf-8").replace("web-db:", "team-stack:")
+    exported_file.write_text(pack_text, encoding="utf-8")
+
+    r_imp = runner.invoke(app, [*base_args, "import", str(exported_file)])
+    assert r_imp.exit_code == 0
+    assert "team-stack" in load_profiles(cfg).profiles
+
+    # 2. auto-switching via .srvp file and shell hook generation
+    r_hook = runner.invoke(app, [*base_args, "auto", "--shell-hook", "bash"])
+    assert r_hook.exit_code == 0
+    assert "_srvp_prompt_hook()" in r_hook.stdout
+
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    (project_dir / ".srvp").write_text("web-db\n", encoding="utf-8")
+
+    r_auto = runner.invoke(app, [*base_args, "auto", "--dir", str(project_dir)])
+    assert r_auto.exit_code == 0
+    assert "Transition: None -> web-db" in r_auto.stdout
+
+    # 3. doctor diagnostics (clean run in mock mode)
+    r_doc = runner.invoke(app, [*base_args, "doctor", "--profile", "web-db"])
+    assert r_doc.exit_code == 0
+    assert "No conflicting ports detected" in r_doc.stdout
+
+    # 4. power-check (udev rule output + battery check)
+    r_udev = runner.invoke(app, [*base_args, "power-check", "--udev-rule"])
+    assert r_udev.exit_code == 0
+    assert 'SUBSYSTEM=="power_supply"' in r_udev.stdout
+
+    r_pwr = runner.invoke(app, [*base_args, "power-check", "--threshold", "30"])
+    assert r_pwr.exit_code == 0
+    assert "Battery Status:" in r_pwr.stdout

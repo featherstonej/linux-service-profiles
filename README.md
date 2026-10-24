@@ -28,9 +28,16 @@ srvp switch esp32-embedded
 - **Multi-Provider Support**:
   - **Systemd**: System units (`systemctl`) and User units (`systemctl --user`), plus explicit `ensure_stopped` conflict lists.
   - **Docker & Docker Compose**: Manages `docker.service`, standalone containers, and `docker compose -f <file> up -d / down` stacks.
+  - **Podman & Podman Compose**: Manages rootless/rootful `podman` containers and `podman compose -f <file> up -d / down` stacks.
+  - **Libvirt / KVM Virtual Machines**: Starts and gracefully shuts down `virsh` VMs (`libvirtd.service` automatically managed).
   - **Android (ADB)**: Starts and stops the Android Debug Bridge daemon (`adb start-server` / `adb kill-server`).
   - **ESP32 / Serial Diagnostics**: Verifies `/dev/ttyUSB*` & `/dev/ttyACM*` device nodes, checks serial group membership (`dialout` on Debian/Ubuntu/Fedora/openSUSE or `uucp` on Arch), and automatically stops conflicting `brltty` and `ModemManager` daemons.
   - **Custom Shell Hooks**: Run `pre_start`, `post_start`, `pre_stop`, and `post_stop` commands on profile transitions.
+- **Automation & Pre-Flight Diagnostics**:
+  - **Directory Auto-Switching (`.srvp`)**: Place a `.srvp` file in any project directory and use `srvp auto` (or `eval "$(srvp auto --shell-hook bash)"`) to switch profiles automatically on `cd`.
+  - **Port Conflict Doctor (`srvp doctor`)**: Detects unmanaged processes occupying TCP ports needed by a profile (e.g., `:5432`, `:6379`) and warns in both the CLI and TUI transition preview.
+  - **Battery Power Saver (`srvp power-check`)**: Automatically switches to `idle` when on battery below a configured threshold, or generates a `udev` rule (`--udev-rule`).
+  - **Shareable Profile Packs (`srvp export` / `srvp import`)**: Export profiles to YAML files for team repositories and import/merge them with validation.
 - **Batched `sudo` & Polkit Generator**: Batches privileged `systemctl` calls so you only enter your password once per switch, or generates a Polkit rule (`srvp polkit-setup`) for passwordless switching.
 - **Safe `--dry-run` & `--mock` Modes**: Preview every command before executing, or simulate switches in memory with isolated mock activation state (`mock_state.json`).
 
@@ -86,6 +93,11 @@ python3 -m venv .venv
    srvp switch web-db                 # Activate the web-db profile
    srvp status                        # Show live service status, PIDs, CPU %, and RAM
    srvp snapshot my-current-stack     # Save currently running services/containers as a new profile
+   srvp doctor --profile web-db       # Check for TCP port conflicts and serial group readiness
+   srvp auto                          # Switch profile based on .srvp in current/parent directory
+   srvp power-check --threshold 25    # Switch to idle if discharging at or below 25% battery
+   srvp export web-db -o web-db.yaml  # Export a profile to a shareable YAML pack
+   srvp import web-db.yaml            # Import and merge a shared YAML profile pack
    srvp stop                          # Stop active profile services (return to idle)
    srvp validate                      # Validate profiles.yaml syntax and paths
    srvp --install-completion          # Install dynamic shell tab-completion (bash/zsh/fish)

@@ -41,6 +41,24 @@ class ProcessMetrics:
     memory_mb: float = 0.0
 
 
+@dataclass(frozen=True)
+class ListeningPort:
+    """Represents a bound local TCP port and the process holding it."""
+
+    port: int
+    process_name: str
+    pid: int | None = None
+
+
+@dataclass(frozen=True)
+class BatteryStatus:
+    """Laptop battery and AC power state."""
+
+    percent: float
+    power_plugged: bool
+    present: bool = True
+
+
 class CommandExecutor(Protocol):
     """Protocol for executing system commands and querying host status."""
 
@@ -64,6 +82,10 @@ class CommandExecutor(Protocol):
     def get_user_groups(self) -> list[str]: ...
 
     def file_exists(self, path: str) -> bool: ...
+
+    def get_listening_ports(self) -> list[ListeningPort]: ...
+
+    def get_battery_status(self) -> BatteryStatus: ...
 
 
 class RealCommandExecutor:
@@ -224,6 +246,40 @@ class RealCommandExecutor:
     def file_exists(self, path: str) -> bool:
         return Path(path).expanduser().exists()
 
+    def get_listening_ports(self) -> list[ListeningPort]:
+        ports: list[ListeningPort] = []
+        seen: set[int] = set()
+        try:
+            for conn in psutil.net_connections(kind="tcp"):
+                if conn.status == psutil.CONN_LISTEN and conn.laddr:
+                    port = int(conn.laddr.port)
+                    if port in seen:
+                        continue
+                    seen.add(port)
+                    pname = "unknown"
+                    if conn.pid:
+                        try:
+                            pname = psutil.Process(conn.pid).name()
+                        except Exception:
+                            pname = "unknown"
+                    ports.append(ListeningPort(port=port, process_name=pname, pid=conn.pid))
+        except Exception:
+            pass
+        return sorted(ports, key=lambda p: p.port)
+
+    def get_battery_status(self) -> BatteryStatus:
+        try:
+            bat = psutil.sensors_battery()
+            if bat is None:
+                return BatteryStatus(percent=100.0, power_plugged=True, present=False)
+            return BatteryStatus(
+                percent=round(float(bat.percent), 1),
+                power_plugged=bool(bat.power_plugged),
+                present=True,
+            )
+        except Exception:
+            return BatteryStatus(percent=100.0, power_plugged=True, present=False)
+
 
 @dataclass
 class MockCommandExecutor:
@@ -236,10 +292,17 @@ class MockCommandExecutor:
     not_found_units: set[str] = field(default_factory=set)
     active_containers: set[str] = field(default_factory=set)
     active_compose_files: set[str] = field(default_factory=set)
+    active_podman_containers: set[str] = field(default_factory=set)
+    active_podman_compose_files: set[str] = field(default_factory=set)
+    active_vms: set[str] = field(default_factory=set)
     adb_running: bool = False
     serial_ports: list[str] = field(default_factory=lambda: ["/dev/ttyUSB0"])
     user_groups: list[str] = field(default_factory=lambda: ["james", "sudo", "dialout"])
     existing_files: set[str] = field(default_factory=set)
+    listening_ports: list[ListeningPort] = field(default_factory=list)
+    battery_status: BatteryStatus = field(
+        default_factory=lambda: BatteryStatus(percent=85.0, power_plugged=True, present=True)
+    )
     history: list[CommandResult] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -250,6 +313,9 @@ class MockCommandExecutor:
                 self.active_user_units = set(data.get("active_user_units", []))
                 self.active_containers = set(data.get("active_containers", []))
                 self.active_compose_files = set(data.get("active_compose_files", []))
+                self.active_podman_containers = set(data.get("active_podman_containers", []))
+                self.active_podman_compose_files = set(data.get("active_podman_compose_files", []))
+                self.active_vms = set(data.get("active_vms", []))
                 self.adb_running = bool(data.get("adb_running", False))
             except Exception:
                 pass
@@ -263,6 +329,9 @@ class MockCommandExecutor:
             "active_user_units": sorted(self.active_user_units),
             "active_containers": sorted(self.active_containers),
             "active_compose_files": sorted(self.active_compose_files),
+            "active_podman_containers": sorted(self.active_podman_containers),
+            "active_podman_compose_files": sorted(self.active_podman_compose_files),
+            "active_vms": sorted(self.active_vms),
             "adb_running": self.adb_running,
         }
         self.state_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -439,6 +508,63 @@ class MockCommandExecutor:
                 elif "ps" in cmd:
                     stdout = "running" if compose_file in self.active_compose_files else ""
 
+        # Simulate podman and podman compose
+        elif cmd and cmd[0] == "podman":
+            if len(cmd) >= 2 and cmd[1] == "ps":
+                mock_podman = sorted(
+                    {"podman-redis", "podman-keycloak"} | self.active_podman_containers
+                )
+                stdout = "\n".join(
+                    f"{c}|{'running' if c in self.active_podman_containers else 'exited'}"
+                    for c in mock_podman
+                )
+            elif len(cmd) >= 2 and cmd[1] == "start":
+                for c in cmd[2:]:
+                    self.active_podman_containers.add(c)
+                stdout = "\n".join(cmd[2:])
+            elif len(cmd) >= 2 and cmd[1] == "stop":
+                for c in cmd[2:]:
+                    self.active_podman_containers.discard(c)
+                stdout = "\n".join(cmd[2:])
+            elif len(cmd) >= 2 and cmd[1] == "inspect":
+                target = cmd[-1]
+                if target in self.active_podman_containers:
+                    pid = abs(hash(target)) % 8000 + 3000
+                    stdout = f"true|{pid}"
+                else:
+                    stdout = "false|0"
+            elif len(cmd) >= 2 and cmd[1] == "compose":
+                compose_file = ""
+                if "-f" in cmd:
+                    f_idx = cmd.index("-f")
+                    if f_idx + 1 < len(cmd):
+                        compose_file = cmd[f_idx + 1]
+                if "up" in cmd:
+                    self.active_podman_compose_files.add(compose_file)
+                    stdout = f"Podman compose stack {compose_file} started"
+                elif "down" in cmd:
+                    self.active_podman_compose_files.discard(compose_file)
+                    stdout = f"Podman compose stack {compose_file} stopped"
+                elif "ps" in cmd:
+                    stdout = "running" if compose_file in self.active_podman_compose_files else ""
+
+        # Simulate virsh (Libvirt / KVM virtual machines)
+        elif cmd and cmd[0] == "virsh":
+            if len(cmd) >= 2 and cmd[1] == "list":
+                mock_vms = sorted({"ubuntu-test-vm", "arch-dev-vm"} | self.active_vms)
+                stdout = "\n".join(mock_vms)
+            elif len(cmd) >= 3 and cmd[1] == "start":
+                vm = cmd[2]
+                self.active_vms.add(vm)
+                stdout = f"Domain '{vm}' started"
+            elif len(cmd) >= 3 and cmd[1] == "shutdown":
+                vm = cmd[2]
+                self.active_vms.discard(vm)
+                stdout = f"Domain '{vm}' is beingov shut down"
+            elif len(cmd) >= 3 and cmd[1] == "domstate":
+                vm = cmd[2]
+                stdout = "running" if vm in self.active_vms else "shut off"
+
         # Simulate adb
         elif cmd and cmd[0] == "adb":
             if "start-server" in cmd:
@@ -502,3 +628,9 @@ class MockCommandExecutor:
         ):
             return True
         return Path(path).expanduser().exists()
+
+    def get_listening_ports(self) -> list[ListeningPort]:
+        return list(self.listening_ports)
+
+    def get_battery_status(self) -> BatteryStatus:
+        return self.battery_status

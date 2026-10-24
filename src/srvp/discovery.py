@@ -10,6 +10,8 @@ from srvp.config import (
     AndroidConfig,
     DockerComposeStack,
     DockerConfig,
+    LibvirtConfig,
+    PodmanConfig,
     ProfileConfig,
     SystemdConfig,
 )
@@ -263,6 +265,51 @@ def discover_installed_services(executor: CommandExecutor) -> list[DiscoveredSer
                         )
                     )
 
+    # 4. Existing Podman containers
+    podman_ps = executor.run(
+        ["podman", "ps", "-a", "--format", "{{.Names}}|{{.State}}"],
+        sudo=False,
+        mutating=False,
+    )
+    if podman_ps.returncode == 0 and podman_ps.stdout.strip():
+        for line in podman_ps.stdout.splitlines():
+            if "|" in line:
+                name, state = line.strip().split("|", 1)
+                if name:
+                    results.append(
+                        DiscoveredService(
+                            category="podman_container",
+                            name=name,
+                            machine_state=state,
+                            is_core_os=False,
+                        )
+                    )
+
+    # 5. Existing Libvirt / KVM virtual machines
+    virsh_list = executor.run(
+        ["virsh", "list", "--all", "--name"],
+        sudo=False,
+        mutating=False,
+    )
+    if virsh_list.returncode == 0 and virsh_list.stdout.strip():
+        for line in virsh_list.stdout.splitlines():
+            vm_name = line.strip()
+            if vm_name:
+                st_res = executor.run(
+                    ["virsh", "domstate", vm_name],
+                    sudo=False,
+                    mutating=False,
+                )
+                vm_state = st_res.stdout.strip() if st_res.returncode == 0 else "shut off"
+                results.append(
+                    DiscoveredService(
+                        category="libvirt_vm",
+                        name=vm_name,
+                        machine_state=vm_state,
+                        is_core_os=False,
+                    )
+                )
+
     return results
 
 
@@ -485,6 +532,8 @@ def build_snapshot_profile(
     usr_running: list[str] = []
     containers_running: list[str] = []
     compose_groups: dict[tuple[str, str, str], set[str]] = {}
+    podman_running: list[str] = []
+    vms_running: list[str] = []
 
     for item in discovered:
         state_lower = item.machine_state.lower()
@@ -506,6 +555,10 @@ def build_snapshot_profile(
                     compose_groups[key].add(item.compose_service)
             else:
                 containers_running.append(item.name)
+        elif item.category == "podman_container" and state_lower.startswith("running"):
+            podman_running.append(item.name)
+        elif item.category == "libvirt_vm" and "running" in state_lower:
+            vms_running.append(item.name)
 
     projects = [key[0] for key in compose_groups]
     compose_stacks: list[DockerComposeStack] = []
@@ -549,5 +602,7 @@ def build_snapshot_profile(
             containers=containers_running,
             compose_stacks=compose_stacks,
         ),
+        podman=PodmanConfig(containers=podman_running),
+        libvirt=LibvirtConfig(vms=vms_running),
         android=AndroidConfig(adb_server=adb_active),
     )
