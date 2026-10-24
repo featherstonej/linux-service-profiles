@@ -315,3 +315,63 @@ def test_failed_start_preserves_previously_tracked_and_partially_started_items(
     # Both previously active postgresql.service and partially started compose stack remain tracked
     assert ("systemd_system", "postgresql.service") in saved_keys
     assert ("docker_compose", "partial-stack") in saved_keys
+
+
+def test_failed_start_tracks_systemd_unit_still_activating(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    from srvp.config import SystemdConfig
+
+    starter_profiles.profiles["slow-start"] = ProfileConfig(
+        systemd=SystemdConfig(system=["slow.service"])
+    )
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+    orig_run = mock_executor.run
+
+    def fail_start_while_activating(
+        cmd: list[str],
+        *,
+        sudo: bool = False,
+        cwd: str | None = None,
+        shell: bool = False,
+        mutating: bool = True,
+    ) -> CommandResult:
+        if cmd[:2] == ["systemctl", "start"]:
+            res = CommandResult(
+                command=["sudo", *cmd],
+                returncode=1,
+                stdout="",
+                stderr="Start operation timed out",
+                dry_run=False,
+            )
+            mock_executor.history.append(res)
+            return res
+        if cmd[:2] == ["systemctl", "show"] and "--property=ActiveState" in cmd:
+            res = CommandResult(
+                command=cmd,
+                returncode=0,
+                stdout="ActiveState=activating",
+                stderr="",
+                dry_run=False,
+            )
+            mock_executor.history.append(res)
+            return res
+        return orig_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+
+    mock_executor.run = fail_start_while_activating  # type: ignore[method-assign]
+
+    result = engine.switch_profile("slow-start")
+
+    assert result.success is False
+    assert [it.identifier for it in state_manager.load().active_items] == ["slow.service"]
+
+    stop_result = engine.stop_all()
+
+    assert stop_result.success is True
+    assert any(
+        record.action == "stop" and record.identifier == "slow.service"
+        for record in stop_result.records
+    )
+    assert state_manager.load().active_items == []

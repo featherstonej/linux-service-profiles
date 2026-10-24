@@ -32,6 +32,23 @@ def _is_unit_confirmed_not_found(
     return load_state == "not-found" and active_state in ("inactive", "dead", "")
 
 
+def _is_unit_activating(
+    unit_name: str,
+    executor: CommandExecutor,
+    *,
+    user: bool = False,
+) -> bool:
+    """Return True if systemd reports that a unit is still starting."""
+    cmd = ["systemctl"]
+    if user:
+        cmd.append("--user")
+    cmd.extend(["show", unit_name, "--property=ActiveState"])
+    res = executor.run(cmd, sudo=False, mutating=False)
+    return res.returncode == 0 and any(
+        line.strip() == "ActiveState=activating" for line in res.stdout.splitlines()
+    )
+
+
 def _parse_systemctl_show(output: str) -> tuple[bool, int | None]:
     """Parse `systemctl show --property=ActiveState,MainPID` output."""
     active = False
@@ -54,6 +71,9 @@ class SystemdSystemProvider(ServiceProvider):
     """Manages system-level systemd units via batched `sudo systemctl` commands."""
 
     provider_name = "systemd_system"
+
+    def is_start_pending(self, item: ManagedItem, executor: CommandExecutor) -> bool:
+        return _is_unit_activating(item.identifier, executor)
 
     def get_desired_items(self, profile: ProfileConfig) -> list[ManagedItem]:
         return [
@@ -186,6 +206,9 @@ class SystemdUserProvider(ServiceProvider):
     """Manages user-level systemd units via `systemctl --user`."""
 
     provider_name = "systemd_user"
+
+    def is_start_pending(self, item: ManagedItem, executor: CommandExecutor) -> bool:
+        return _is_unit_activating(item.identifier, executor, user=True)
 
     def get_desired_items(self, profile: ProfileConfig) -> list[ManagedItem]:
         return [

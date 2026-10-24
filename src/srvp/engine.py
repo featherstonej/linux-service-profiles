@@ -333,7 +333,9 @@ class ProfileEngine:
         """Check whether a failed start attempt still left any part of `item` running."""
         if isinstance(provider, DockerComposeProvider):
             return provider.has_running_containers(item, self.executor)
-        return provider.get_status(item, self.executor).active
+        return provider.get_status(item, self.executor).active or provider.is_start_pending(
+            item, self.executor
+        )
 
     def switch_profile(self, target_profile_name: str) -> TransitionResult:
         """Compute and execute an exclusive switch to `target_profile_name`."""

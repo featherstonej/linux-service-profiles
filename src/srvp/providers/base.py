@@ -50,6 +50,10 @@ class ServiceProvider(ABC):
         """Return items that `profile` explicitly requires to be stopped."""
         return []
 
+    def is_start_pending(self, item: ManagedItem, executor: CommandExecutor) -> bool:
+        """Return whether a failed start attempt may still complete asynchronously."""
+        return False
+
     @abstractmethod
     def get_status(self, item: ManagedItem, executor: CommandExecutor) -> ServiceStatus:
         """Query the live status and PID metrics of `item`."""
