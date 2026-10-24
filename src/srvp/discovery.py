@@ -414,7 +414,7 @@ def build_snapshot_profile(
         if item.category == "systemd_system" and not item.is_core_os:
             if state_lower.startswith("active"):
                 sys_running.append(item.name)
-        elif item.category == "systemd_user":
+        elif item.category == "systemd_user" and not is_core_os_unit(item.name):
             if state_lower.startswith("active"):
                 usr_running.append(item.name)
         elif item.category == "docker_container" and state_lower.startswith("running"):
