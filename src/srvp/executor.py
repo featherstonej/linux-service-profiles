@@ -427,6 +427,9 @@ class MockCommandExecutor:
                 if "up" in cmd:
                     self.active_compose_files.add(compose_file)
                     stdout = f"Compose stack {compose_file} started"
+                elif "stop" in cmd:
+                    self.active_compose_files.discard(compose_file)
+                    stdout = f"Compose services from {compose_file} stopped"
                 elif "down" in cmd:
                     self.active_compose_files.discard(compose_file)
                     stdout = f"Compose stack {compose_file} stopped"

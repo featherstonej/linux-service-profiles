@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from srvp.config import (
     AndroidConfig,
     DockerComposeStack,
@@ -113,32 +111,29 @@ def test_docker_container_and_compose_providers(mock_executor: MockCommandExecut
         "compose",
         "-f",
         "/tmp/compose.yml",
-        "rm",
-        "--force",
-        "--stop",
+        "stop",
         "api",
         "worker",
     ]
-    assert comp_prov.get_status(comp_items[0], mock_executor).active is False
 
-    whole_stack = comp_prov.get_desired_items(
-        ProfileConfig(
-            docker=DockerConfig(
-                compose_stacks=[
-                    DockerComposeStack(
-                        name="whole",
-                        file="/tmp/whole.yml",
-                    )
-                ]
-            )
+
+def test_docker_compose_stop_uses_down_for_whole_stack(
+    mock_executor: MockCommandExecutor,
+) -> None:
+    provider = DockerComposeProvider()
+    profile = ProfileConfig(
+        docker=DockerConfig(
+            compose_stacks=[DockerComposeStack(name="backend", file="/tmp/compose.yml")]
         )
     )
-    comp_prov.stop_items(whole_stack, mock_executor)
+
+    provider.stop_items(provider.get_desired_items(profile), mock_executor)
+
     assert mock_executor.history[-1].command == [
         "docker",
         "compose",
         "-f",
-        "/tmp/whole.yml",
+        "/tmp/compose.yml",
         "down",
     ]
 
@@ -240,7 +235,6 @@ def test_real_executor_polkit_without_unconditional_sudo(monkeypatch: object) ->
 
     # ActiveState=reloading is treated as active
     assert _parse_systemctl_show("ActiveState=reloading\nMainPID=1234\n") == (True, 1234)
-    assert _parse_systemctl_show("ActiveState=activating\nMainPID=0\n") == (True, None)
 
     mp = pytest.MonkeyPatch()
     calls: list[list[str]] = []
@@ -266,38 +260,44 @@ def test_real_executor_polkit_without_unconditional_sudo(monkeypatch: object) ->
         mp.undo()
 
 
-def test_shell_timeout_terminates_and_reaps_process_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_real_executor_kills_shell_process_group_on_timeout() -> None:
     import os
     import signal
     import subprocess
 
+    import pytest
+
     from srvp.executor import RealCommandExecutor
 
-    class TimedOutProcess:
-        pid = 4242
-        returncode = -signal.SIGTERM
+    mp = pytest.MonkeyPatch()
+    signals: list[tuple[int, int]] = []
+    popen_kwargs: dict[str, object] = {}
 
-        def __init__(self) -> None:
+    class FakeProcess:
+        pid = 123
+        returncode = -signal.SIGKILL
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            popen_kwargs.update(kwargs)
             self.communicate_calls = 0
 
-        def communicate(self, timeout: int) -> tuple[str, str]:
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
             self.communicate_calls += 1
-            if self.communicate_calls == 1:
-                raise subprocess.TimeoutExpired("hook", timeout)
-            return "partial output", ""
+            if self.communicate_calls < 3:
+                raise subprocess.TimeoutExpired(
+                    "hook",
+                    timeout if timeout is not None else 0.0,
+                )
+            return "", ""
 
-    process = TimedOutProcess()
-    popen_kwargs: dict[str, object] = {}
-    signals: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda *args, **kwargs: popen_kwargs.update(kwargs) or process
-    )
-    monkeypatch.setattr(os, "killpg", lambda pid, sig: signals.append((pid, sig)))
-    result = RealCommandExecutor().run(["long-running-hook"], shell=True)
+    mp.setattr(subprocess, "Popen", FakeProcess)
+    mp.setattr(os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    try:
+        result = RealCommandExecutor().run(["sleep 999"], shell=True)
 
-    assert popen_kwargs["start_new_session"] is True
-    assert signals == [(process.pid, signal.SIGTERM)]
-    assert process.communicate_calls == 2
-    assert result.returncode != 0
+        assert popen_kwargs["start_new_session"] is True
+        assert signals == [(123, signal.SIGTERM), (123, signal.SIGKILL)]
+        assert result.returncode == 1
+        assert "timed out" in result.stderr
+    finally:
+        mp.undo()

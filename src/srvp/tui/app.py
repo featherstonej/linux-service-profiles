@@ -22,7 +22,13 @@ from textual.widgets import (
     Static,
 )
 
-from srvp.config import ProfileConfig, ProfilesFile, load_profiles, update_profiles
+from srvp.config import (
+    ProfileConfig,
+    ProfileConflictError,
+    ProfilesFile,
+    load_profiles,
+    update_profiles,
+)
 from srvp.discovery import build_snapshot_profile
 from srvp.engine import ProfileEngine, TransitionPlan, TransitionResult
 from srvp.executor import CommandExecutor, MockCommandExecutor, RealCommandExecutor
@@ -145,9 +151,9 @@ class SrvpApp(App[None]):
 
         if not self.config_path.exists():
             update_profiles(
-                lambda _config: None,
                 self.config_path,
-                initial_config=build_starter_profiles(),
+                lambda _: None,
+                initial=build_starter_profiles(),
             )
 
         self.profiles_file = load_profiles(self.config_path)
@@ -565,17 +571,19 @@ class SrvpApp(App[None]):
             return
         name, new_prof = result
 
-        def add_profile(config: ProfilesFile) -> None:
-            if name in config.profiles:
-                raise ValueError(f"Profile '{name}' already exists.")
-            config.profiles[name] = new_prof
+        def _add(current: ProfilesFile) -> None:
+            if name in current.profiles:
+                raise ProfileConflictError(
+                    f"Cannot create profile '{name}': a profile with that name already exists."
+                )
+            current.profiles[name] = new_prof
 
         try:
-            self.profiles_file = update_profiles(add_profile, self.config_path)
-            self.engine.config = self.profiles_file
-        except (ValueError, OSError) as exc:
-            log.write(f"[bold red]Cannot create profile: {escape(str(exc))}[/bold red]")
+            self.profiles_file = update_profiles(self.config_path, _add)
+        except ProfileConflictError as exc:
+            log.write(f"[bold red]{escape(str(exc))}[/bold red]")
             return
+        self.engine.config = self.profiles_file
         self.selected_profile = name
         self._rebuild_profile_list()
         self.refresh_views()
@@ -592,6 +600,7 @@ class SrvpApp(App[None]):
             return
         orig_name = self.selected_profile
         orig_prof = self.profiles_file.profiles[orig_name]
+        original_profile = orig_prof.model_copy(deep=True)
 
         def _on_edited(result: tuple[str, ProfileConfig] | None) -> None:
             if result is None:
@@ -604,24 +613,26 @@ class SrvpApp(App[None]):
                 return
             new_name, updated_prof = result
 
-            def update_profile(config: ProfilesFile) -> None:
-                current = config.profiles.get(orig_name)
-                if current is None:
-                    raise ValueError(f"Profile '{orig_name}' no longer exists.")
-                if current.model_dump() != orig_prof.model_dump():
-                    raise ValueError(f"Profile '{orig_name}' changed since it was opened.")
-                if new_name != orig_name and new_name in config.profiles:
-                    raise ValueError(f"Profile '{new_name}' already exists.")
+            def _update(current: ProfilesFile) -> None:
+                if current.profiles.get(orig_name) != original_profile:
+                    raise ProfileConflictError(
+                        f"Cannot update profile '{orig_name}': it changed since it was loaded."
+                    )
+                if new_name != orig_name and new_name in current.profiles:
+                    raise ProfileConflictError(
+                        f"Cannot rename '{orig_name}' to '{new_name}': "
+                        f"profile '{new_name}' already exists."
+                    )
                 if new_name != orig_name:
-                    config.profiles.pop(orig_name)
-                config.profiles[new_name] = updated_prof
+                    current.profiles.pop(orig_name)
+                current.profiles[new_name] = updated_prof
 
             try:
-                self.profiles_file = update_profiles(update_profile, self.config_path)
-                self.engine.config = self.profiles_file
-            except (ValueError, OSError) as exc:
-                log.write(f"[bold red]Cannot save profile: {escape(str(exc))}[/bold red]")
+                self.profiles_file = update_profiles(self.config_path, _update)
+            except ProfileConflictError as exc:
+                log.write(f"[bold red]{escape(str(exc))}[/bold red]")
                 return
+            self.engine.config = self.profiles_file
             if new_name != orig_name:
                 self.state_manager.rename_active_profile(orig_name, new_name)
             self.selected_profile = new_name
@@ -648,6 +659,7 @@ class SrvpApp(App[None]):
         if not self.selected_profile or self.selected_profile not in self.profiles_file.profiles:
             return
         target = self.selected_profile
+        original_profile = self.profiles_file.profiles[target].model_copy(deep=True)
         try:
             active_now = self.state_manager.load().active_profile
         except Exception as exc:
@@ -686,22 +698,20 @@ class SrvpApp(App[None]):
                     "Stop it first (x) or switch to another profile before deleting.[/bold red]"
                 )
                 return
-            original_profile = self.profiles_file.profiles[target]
 
-            def delete_profile(config: ProfilesFile) -> None:
-                current = config.profiles.get(target)
-                if current is None:
-                    raise ValueError(f"Profile '{target}' no longer exists.")
-                if current.model_dump() != original_profile.model_dump():
-                    raise ValueError(f"Profile '{target}' changed before it could be deleted.")
-                del config.profiles[target]
+            def _delete(current: ProfilesFile) -> None:
+                if current.profiles.get(target) != original_profile:
+                    raise ProfileConflictError(
+                        f"Cannot delete profile '{target}': it changed since it was loaded."
+                    )
+                current.profiles.pop(target)
 
             try:
-                self.profiles_file = update_profiles(delete_profile, self.config_path)
-                self.engine.config = self.profiles_file
-            except (ValueError, OSError) as exc:
-                log.write(f"[bold red]Cannot delete profile: {escape(str(exc))}[/bold red]")
+                self.profiles_file = update_profiles(self.config_path, _delete)
+            except ProfileConflictError as exc:
+                log.write(f"[bold red]{escape(str(exc))}[/bold red]")
                 return
+            self.engine.config = self.profiles_file
             self.selected_profile = next(iter(self.profiles_file.profiles.keys()), None)
             self._rebuild_profile_list()
             self.refresh_views()

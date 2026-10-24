@@ -324,17 +324,20 @@ def test_failed_start_preserves_previously_tracked_and_partially_started_items(
     assert ("docker_compose", "partial-stack") in saved_keys
 
 
-def test_failed_systemd_start_remains_tracked_for_reconciliation(
+def test_failed_start_tracks_systemd_unit_still_activating(
     starter_profiles: ProfilesFile,
     state_manager: StateManager,
     mock_executor: MockCommandExecutor,
 ) -> None:
-    starter_profiles.profiles["pending"] = ProfileConfig(
-        systemd=SystemdConfig(system=["slow-start.service"])
-    )
-    original_run = mock_executor.run
+    from srvp.config import SystemdConfig
 
-    def fail_start(
+    starter_profiles.profiles["slow-start"] = ProfileConfig(
+        systemd=SystemdConfig(system=["slow.service"])
+    )
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+    orig_run = mock_executor.run
+
+    def fail_start_while_activating(
         cmd: list[str],
         *,
         sudo: bool = False,
@@ -343,26 +346,42 @@ def test_failed_systemd_start_remains_tracked_for_reconciliation(
         mutating: bool = True,
     ) -> CommandResult:
         if cmd[:2] == ["systemctl", "start"]:
-            result = CommandResult(cmd, 1, stderr="start timed out")
-            mock_executor.history.append(result)
-            return result
-        if cmd[:3] == ["systemctl", "show", "slow-start.service"]:
-            result = CommandResult(
-                cmd,
-                0,
-                stdout="ActiveState=activating\nMainPID=0",
+            res = CommandResult(
+                command=["sudo", *cmd],
+                returncode=1,
+                stdout="",
+                stderr="Start operation timed out",
+                dry_run=False,
             )
-            mock_executor.history.append(result)
-            return result
-        return original_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+            mock_executor.history.append(res)
+            return res
+        if cmd[:2] == ["systemctl", "show"] and "--property=ActiveState" in cmd:
+            res = CommandResult(
+                command=cmd,
+                returncode=0,
+                stdout="ActiveState=activating",
+                stderr="",
+                dry_run=False,
+            )
+            mock_executor.history.append(res)
+            return res
+        return orig_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
 
-    mock_executor.run = fail_start  # type: ignore[method-assign]
-    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+    mock_executor.run = fail_start_while_activating  # type: ignore[method-assign]
 
-    assert engine.switch_profile("pending").success is False
-    assert ("systemd_system", "slow-start.service") in {
-        item.key for item in state_manager.load().active_items
-    }
+    result = engine.switch_profile("slow-start")
+
+    assert result.success is False
+    assert [it.identifier for it in state_manager.load().active_items] == ["slow.service"]
+
+    stop_result = engine.stop_all()
+
+    assert stop_result.success is True
+    assert any(
+        record.action == "stop" and record.identifier == "slow.service"
+        for record in stop_result.records
+    )
+    assert state_manager.load().active_items == []
 
 
 def test_failed_post_start_hook_retains_teardown_hooks(

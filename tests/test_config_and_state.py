@@ -83,21 +83,29 @@ def test_save_and_load_profiles(tmp_path: Path) -> None:
     ]
 
 
-def test_update_profiles_preserves_external_profile_additions(tmp_path: Path) -> None:
+def test_profile_update_preserves_concurrent_changes(tmp_path: Path) -> None:
     cfg_path = tmp_path / "profiles.yaml"
-    save_profiles(build_starter_profiles(), cfg_path)
-    cached = load_profiles(cfg_path)
+    initial = build_starter_profiles(redis_unit="redis-server.service")
+    save_profiles(initial, cfg_path)
+
+    def _add_external_profile(current: ProfilesFile) -> None:
+        current.profiles["external-profile"] = ProfileConfig(
+            description="Created by another writer"
+        )
+
+    update_profiles(cfg_path, _add_external_profile)
 
     update_profiles(
-        lambda config: config.profiles.__setitem__("external", ProfileConfig()),
         cfg_path,
-    )
-    updated = update_profiles(
-        lambda config: config.profiles.__setitem__("from-tui", ProfileConfig()),
-        cfg_path,
+        lambda current: current.profiles.__setitem__(
+            "tui-profile", ProfileConfig(description="Created in the TUI")
+        ),
     )
 
-    assert set(updated.profiles) == set(cached.profiles) | {"external", "from-tui"}
+    saved = load_profiles(cfg_path)
+    assert "external-profile" in saved.profiles
+    assert "tui-profile" in saved.profiles
+    assert "docker-dev" in saved.profiles
 
 
 def test_state_manager_roundtrip_and_corrupt_detection(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ from srvp.config import (
     DockerComposeStack,
     Esp32SerialConfig,
     ProfileConfig,
+    ProfilesFile,
     load_profiles,
     save_profiles,
     update_profiles,
@@ -66,7 +67,6 @@ async def test_tui_dashboard_switch_dry_run_and_stop(
         # Switch to selected profile (web-db) using keybinding 's'
         await pilot.press("s")
         await pilot.pause()
-
         assert app.state_manager.load().active_profile == "web-db"
         assert "postgresql.service" in mock_executor.active_system_units
 
@@ -296,6 +296,79 @@ async def test_tui_profile_editor_create_and_delete(
         assert "snapshot-profile" in load_profiles(tmp_config_path).profiles
 
 
+@pytest.mark.asyncio
+async def test_tui_writes_preserve_concurrent_config_changes(
+    tmp_config_path: Path,
+    tmp_state_path: Path,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    app = SrvpApp(
+        config_path=tmp_config_path,
+        state_path=tmp_state_path,
+        executor=mock_executor,
+    )
+    async with app.run_test(size=(120, 45)) as pilot:
+        await pilot.pause()
+
+        update_profiles(
+            tmp_config_path,
+            lambda current: current.profiles.__setitem__(
+                "created-externally-before-new", ProfileConfig()
+            ),
+        )
+        app._on_profile_saved_new(("created-in-tui", ProfileConfig()))
+        saved = load_profiles(tmp_config_path)
+        assert "created-externally-before-new" in saved.profiles
+        assert "created-in-tui" in saved.profiles
+
+        app.selected_profile = "docker-dev"
+        app.action_edit_selected()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        app.screen.query_one("#profile-desc", Input).value = "Updated in TUI"
+        update_profiles(
+            tmp_config_path,
+            lambda current: current.profiles.__setitem__(
+                "created-externally-before-edit", ProfileConfig()
+            ),
+        )
+        app.screen._validate_and_save()
+        await pilot.pause()
+        saved = load_profiles(tmp_config_path)
+        assert "created-externally-before-edit" in saved.profiles
+        assert saved.profiles["docker-dev"].description == "Updated in TUI"
+
+        app.selected_profile = "docker-dev"
+        app.action_edit_selected()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        app.screen.query_one("#profile-desc", Input).value = "Stale TUI edit"
+
+        def _change_docker_dev(current: ProfilesFile) -> None:
+            current.profiles["docker-dev"].description = "External concurrent edit"
+
+        update_profiles(tmp_config_path, _change_docker_dev)
+        app.screen._validate_and_save()
+        await pilot.pause()
+        saved = load_profiles(tmp_config_path)
+        assert saved.profiles["docker-dev"].description == "External concurrent edit"
+
+        app.selected_profile = "created-in-tui"
+        app.action_delete_selected()
+        await pilot.pause()
+        update_profiles(
+            tmp_config_path,
+            lambda current: current.profiles.__setitem__(
+                "created-externally-before-delete", ProfileConfig()
+            ),
+        )
+        await pilot.click("#btn-confirm-delete")
+        await pilot.pause()
+        saved = load_profiles(tmp_config_path)
+        assert "created-in-tui" not in saved.profiles
+        assert "created-externally-before-delete" in saved.profiles
+
+
 def test_compose_editor_does_not_copy_metadata_by_file_only() -> None:
     existing = [
         DockerComposeStack(
@@ -318,9 +391,8 @@ def test_compose_editor_does_not_copy_metadata_by_file_only() -> None:
         "new-stack:/tmp/project/compose.yml",
         existing,
     )
-    new_stack = parsed[-1]
-    assert new_stack.project_dir is None
-    assert new_stack.services == []
+    assert parsed[-1].project_dir is None
+    assert parsed[-1].services == []
 
     with pytest.raises(ValueError, match="Ambiguous Compose entry"):
         _parse_compose_stacks(
@@ -378,26 +450,3 @@ async def test_transition_log_escapes_dynamic_markup(
         log = app.query_one("#action-log", RichLog)
         app._write_transition_records(log, result)
         await pilot.pause()
-
-
-@pytest.mark.asyncio
-async def test_tui_profile_save_merges_external_profile_changes(
-    tmp_config_path: Path,
-    tmp_state_path: Path,
-    mock_executor: MockCommandExecutor,
-) -> None:
-    app = SrvpApp(
-        config_path=tmp_config_path,
-        state_path=tmp_state_path,
-        executor=mock_executor,
-    )
-    async with app.run_test():
-        update_profiles(
-            lambda config: config.profiles.__setitem__("external-snapshot", ProfileConfig()),
-            tmp_config_path,
-        )
-        app._on_profile_saved_new(("new-in-tui", ProfileConfig()))
-
-    profiles = load_profiles(tmp_config_path).profiles
-    assert "external-snapshot" in profiles
-    assert "new-in-tui" in profiles

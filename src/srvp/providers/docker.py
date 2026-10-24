@@ -206,14 +206,9 @@ class DockerComposeProvider(ServiceProvider):
                 item.metadata.get("file", ""),
                 item.metadata.get("project_dir"),
             )
-            services = [
-                service for service in item.metadata.get("services", "").split(",") if service
-            ]
-            cmd = (
-                ["docker", "compose", "-f", compose_file, "rm", "--force", "--stop", *services]
-                if services
-                else ["docker", "compose", "-f", compose_file, "down"]
-            )
+            services = [s for s in item.metadata.get("services", "").split(",") if s]
+            cmd = ["docker", "compose", "-f", compose_file]
+            cmd.extend(["stop", *services] if services else ["down"])
             res = executor.run(cmd, cwd=project_dir, sudo=False, mutating=True)
             records.append(
                 ActionRecord(

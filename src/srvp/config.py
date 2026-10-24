@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 import tempfile
 from collections.abc import Callable
+from fcntl import LOCK_EX, flock
 from pathlib import Path
 from typing import Any
 
@@ -294,10 +294,50 @@ def load_profiles(path: Path | str | None = None) -> ProfilesFile:
     return ProfilesFile.model_validate(data)
 
 
+class ProfileConflictError(ValueError):
+    """Raised when a profile changed while an update was being prepared."""
+
+
+def update_profiles(
+    path: Path | str | None,
+    update: Callable[[ProfilesFile], None],
+    *,
+    initial: ProfilesFile | None = None,
+) -> ProfilesFile:
+    """Reload, update, and save profiles while holding an exclusive file lock."""
+    resolved = resolve_config_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved.with_name(f".{resolved.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        flock(lock_file.fileno(), LOCK_EX)
+        existed = resolved.exists()
+        if existed:
+            current = load_profiles(resolved)
+        elif initial is not None:
+            current = initial.model_copy(deep=True)
+        else:
+            raise FileNotFoundError(
+                f"Configuration file not found at '{resolved}'. Run 'srvp init' to generate starter profiles."
+            )
+        previous = current.model_dump(mode="json")
+        update(current)
+        if not existed or previous != current.model_dump(mode="json"):
+            _write_profiles(current, resolved)
+        return current
+
+
 def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
     """Serialize and save ProfilesFile to YAML on disk atomically."""
     resolved = resolve_config_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved.with_name(f".{resolved.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        flock(lock_file.fileno(), LOCK_EX)
+        _write_profiles(config, resolved)
+    return resolved
+
+
+def _write_profiles(config: ProfilesFile, resolved: Path) -> None:
     dumped_dict = config.model_dump(mode="json")
     yaml_text = yaml.safe_dump(
         dumped_dict,
@@ -327,30 +367,3 @@ def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
             tmp_path.unlink(missing_ok=True)
             raise
     os.replace(tmp_path, resolved)
-    return resolved
-
-
-def update_profiles(
-    update: Callable[[ProfilesFile], None],
-    path: Path | str | None = None,
-    *,
-    initial_config: ProfilesFile | None = None,
-) -> ProfilesFile:
-    """Reload, update, and atomically save profiles under a shared interprocess lock."""
-    resolved = resolve_config_path(path)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = resolved.with_name(f"{resolved.name}.lock")
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            if resolved.exists():
-                config = load_profiles(resolved)
-            elif initial_config is not None:
-                config = initial_config.model_copy(deep=True)
-            else:
-                raise FileNotFoundError(f"Configuration file not found at '{resolved}'.")
-            update(config)
-            save_profiles(config, resolved)
-            return config
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

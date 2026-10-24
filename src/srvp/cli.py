@@ -15,6 +15,7 @@ from rich.table import Table
 
 from srvp import __version__
 from srvp.config import (
+    ProfileConflictError,
     ProfilesFile,
     load_profiles,
     resolve_config_path,
@@ -460,21 +461,23 @@ def cmd_snapshot(
     executor = cli_ctx.build_executor()
     snap_profile = build_snapshot_profile(executor, description=description)
 
-    def add_snapshot(current: ProfilesFile) -> None:
+    def _add_snapshot(current: ProfilesFile) -> None:
         if cleaned in current.profiles and not force:
-            raise ValueError(f"Profile '{cleaned}' already exists.")
+            raise ProfileConflictError(f"Profile '{cleaned}' already exists.")
         current.profiles[cleaned] = snap_profile
 
     try:
-        profiles_file = update_profiles(
-            add_snapshot,
+        update_profiles(
             cli_ctx.config_path,
-            initial_config=profiles_file,
+            _add_snapshot,
+            initial=build_starter_profiles(),
         )
-    except ValueError as exc:
-        console.print(f"[bold yellow]{escape(str(exc))}[/bold yellow]")
+    except ProfileConflictError as exc:
+        console.print(
+            f"[bold yellow]{escape(str(exc))}[/bold yellow] Pass [bold]--force[/bold] to overwrite it."
+        )
         raise typer.Exit(code=1) from exc
-    saved_path = cli_ctx.config_path
+    saved_path = resolve_config_path(cli_ctx.config_path)
 
     sys_str = ", ".join(snap_profile.systemd.system) or "none"
     usr_str = ", ".join(snap_profile.systemd.user) or "none"
