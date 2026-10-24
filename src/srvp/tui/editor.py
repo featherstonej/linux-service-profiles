@@ -510,7 +510,7 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         elif bid == "btn-compose-apply":
             result: list[DockerComposeStack] = []
             for name, fpath in self.selected_keys:
-                prior = self.existing_by_key.get((name, fpath)) or self.existing_by_file.get(fpath)
+                prior = self.existing_by_key.get((name, fpath))
                 if prior is not None:
                     result.append(
                         DockerComposeStack(
