@@ -1,0 +1,70 @@
+"""End-to-end CLI tests using Typer's CliRunner."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from srvp.cli import app
+
+runner = CliRunner()
+
+
+def test_cli_version() -> None:
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert "srvp (linux-service-profiles) version" in result.stdout
+
+
+def test_cli_init_list_switch_status_stop_validate_polkit(tmp_path: Path) -> None:
+    cfg = tmp_path / "profiles.yaml"
+    st = tmp_path / "state.json"
+    polkit_out = tmp_path / "50-srvp.rules"
+    base_args = ["--config", str(cfg), "--state", str(st), "--mock"]
+
+    # 1. init
+    r_init = runner.invoke(app, [*base_args, "init"])
+    assert r_init.exit_code == 0
+    assert cfg.exists()
+
+    # Second init without --force should fail
+    r_init_dup = runner.invoke(app, [*base_args, "init"])
+    assert r_init_dup.exit_code == 1
+
+    # 2. list
+    r_list = runner.invoke(app, [*base_args, "list"])
+    assert r_list.exit_code == 0
+    assert "web-db" in r_list.stdout
+    assert "esp32-embedded" in r_list.stdout
+
+    # 3. switch web-db
+    r_switch = runner.invoke(app, [*base_args, "switch", "web-db"])
+    assert r_switch.exit_code == 0
+    assert "postgresql.service" in r_switch.stdout
+
+    # 4. status
+    r_status = runner.invoke(app, [*base_args, "status"])
+    assert r_status.exit_code == 0
+    assert "web-db" in r_status.stdout
+
+    # 5. dry-run switch to docker-dev
+    r_dry = runner.invoke(app, [*base_args, "switch", "docker-dev", "--dry-run"])
+    assert r_dry.exit_code == 0
+    assert "DRY-RUN" in r_dry.stdout
+
+    # 6. stop
+    r_stop = runner.invoke(app, [*base_args, "stop"])
+    assert r_stop.exit_code == 0
+    assert "None (Idle)" in r_stop.stdout
+
+    # 7. validate
+    r_val = runner.invoke(app, [*base_args, "validate"])
+    assert r_val.exit_code == 0
+    assert "Configuration is valid" in r_val.stdout
+
+    # 8. polkit-setup
+    r_pk = runner.invoke(app, [*base_args, "polkit-setup", "--output", str(polkit_out)])
+    assert r_pk.exit_code == 0
+    assert polkit_out.exists()
+    assert "org.freedesktop.systemd1.manage-units" in polkit_out.read_text(encoding="utf-8")
