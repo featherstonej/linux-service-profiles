@@ -106,7 +106,36 @@ def test_docker_container_and_compose_providers(mock_executor: MockCommandExecut
     comp_prov.start_items(comp_items, mock_executor)
     assert comp_prov.get_status(comp_items[0], mock_executor).active is True
     comp_prov.stop_items(comp_items, mock_executor)
-    assert comp_prov.get_status(comp_items[0], mock_executor).active is False
+    assert mock_executor.history[-1].command == [
+        "docker",
+        "compose",
+        "-f",
+        "/tmp/compose.yml",
+        "stop",
+        "api",
+        "worker",
+    ]
+
+
+def test_docker_compose_stop_uses_down_for_whole_stack(
+    mock_executor: MockCommandExecutor,
+) -> None:
+    provider = DockerComposeProvider()
+    profile = ProfileConfig(
+        docker=DockerConfig(
+            compose_stacks=[DockerComposeStack(name="backend", file="/tmp/compose.yml")]
+        )
+    )
+
+    provider.stop_items(provider.get_desired_items(profile), mock_executor)
+
+    assert mock_executor.history[-1].command == [
+        "docker",
+        "compose",
+        "-f",
+        "/tmp/compose.yml",
+        "down",
+    ]
 
 
 def test_adb_provider(mock_executor: MockCommandExecutor) -> None:
