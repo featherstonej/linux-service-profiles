@@ -23,7 +23,7 @@ srvp switch esp32-embedded
 
 ## Key Features
 
-- **Interactive Terminal UI (`Textual`)**: Live dashboard (`srvp` or `srvp ui`) showing active profile, service status (`active`/`inactive`), PID, CPU %, and RAM (MB), plus an **in-app Profile Editor** to create, edit, and delete profiles without leaving your terminal.
+- **Interactive Terminal UI (`Textual`)**: Live dashboard (`srvp` or `srvp ui`) showing active profile, service status (`active`/`inactive`), PID, CPU %, and RAM (MB), plus an **in-app Profile Editor** with an **Installed Service & Container Picker** to browse services installed on your machine and mark them Active (Start) or Inactive (Stop).
 - **Exclusive Profile Switching**: Tracks which services were started by the previous profile in `~/.local/state/linux-service-profiles/state.json` and stops unneeded services before starting the new profile's services.
 - **Multi-Provider Support**:
   - **Systemd**: System units (`systemctl`) and User units (`systemctl --user`), plus explicit `ensure_stopped` conflict lists.
@@ -76,6 +76,7 @@ python3 -m venv .venv
    - Press **`d`** to run a Dry-Run preview.
    - Press **`x`** to stop all active profile services (Idle).
    - Press **`n`** / **`e`** / **`Delete`** to create, edit, or delete profiles in the built-in Profile Editor.
+   - Inside the Profile Editor, click **"Browse Installed Services & Containers... (Ctrl+B)"** to search installed systemd units and Docker containers and toggle them between **ACTIVE (Start)**, **INACTIVE (Stop)**, and **Unmanaged**.
 
 3. **Use CLI Subcommands**:
    ```bash
