@@ -40,6 +40,8 @@ async def test_tui_dashboard_switch_dry_run_and_stop(
             "#btn-new",
             "#btn-edit",
             "#btn-delete",
+            "#btn-clone",
+            "#btn-snapshot",
         ):
             btn = app.query_one(btn_id)
             assert btn.region.width >= 6, f"{btn_id} width too small: {btn.region}"
@@ -60,6 +62,16 @@ async def test_tui_dashboard_switch_dry_run_and_stop(
         # Trigger dry-run preview with 'd'
         await pilot.press("d")
         await pilot.pause()
+
+        # Toggle auto-refresh pause/resume with 'p' and verify timer tick
+        assert app.auto_refresh_enabled is True
+        await pilot.press("p")
+        await pilot.pause()
+        assert app.auto_refresh_enabled is False
+        await pilot.press("p")
+        await pilot.pause()
+        assert app.auto_refresh_enabled is True
+        app._on_auto_refresh_tick()
 
         # Stop all with 'x'
         await pilot.press("x")
@@ -167,3 +179,24 @@ async def test_tui_profile_editor_create_and_delete(
 
         reloaded_after = load_profiles(tmp_config_path)
         assert "custom-iot" not in reloaded_after.profiles
+
+        # Test Clone Profile ('c' / action_clone_selected)
+        app.selected_profile = "web-db"
+        app.action_clone_selected()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        assert app.screen.query_one("#profile-name", Input).value == "web-db-copy"
+        app.screen._validate_and_save()
+        await pilot.pause()
+        assert "web-db-copy" in load_profiles(tmp_config_path).profiles
+
+        # Test Snapshot Running ('m' / action_snapshot_running)
+        mock_executor.active_system_units.add("postgresql.service")
+        app.action_snapshot_running()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        assert app.screen.query_one("#profile-name", Input).value == "snapshot-profile"
+        assert "postgresql.service" in app.screen.query_one("#systemd-system", Input).value
+        app.screen._validate_and_save()
+        await pilot.pause()
+        assert "snapshot-profile" in load_profiles(tmp_config_path).profiles

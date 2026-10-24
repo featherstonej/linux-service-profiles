@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from srvp.config import (
+    AndroidConfig,
+    DockerConfig,
+    ProfileConfig,
+    SystemdConfig,
+)
 from srvp.executor import CommandExecutor, MockCommandExecutor
 
 # Low-level OS plumbing prefixes and exact unit names hidden by default in the curated view.
@@ -342,3 +348,44 @@ COMMON_HOOK_PRESETS: list[HookPreset] = [
         command="echo 'Profile environment is ready.'",
     ),
 ]
+
+
+def build_snapshot_profile(
+    executor: CommandExecutor,
+    description: str = "Snapshot of running machine services and containers.",
+) -> ProfileConfig:
+    """Capture currently active non-core system units, user units, containers, and ADB into a ProfileConfig."""
+    discovered = discover_installed_services(executor)
+    sys_running: list[str] = []
+    usr_running: list[str] = []
+    containers_running: list[str] = []
+
+    for item in discovered:
+        state_lower = item.machine_state.lower()
+        if item.category == "systemd_system" and not item.is_core_os:
+            if state_lower.startswith("active"):
+                sys_running.append(item.name)
+        elif item.category == "systemd_user":
+            if state_lower.startswith("active"):
+                usr_running.append(item.name)
+        elif item.category == "docker_container" and state_lower.startswith("running"):
+            containers_running.append(item.name)
+
+    adb_res = executor.run(["pgrep", "-x", "adb"], sudo=False, mutating=False)
+    adb_active = adb_res.returncode == 0 and bool(adb_res.stdout.strip())
+    docker_enabled = "docker.service" in sys_running or bool(containers_running)
+
+    return ProfileConfig(
+        description=description,
+        systemd=SystemdConfig(
+            system=sys_running,
+            user=usr_running,
+            ensure_stopped=[],
+        ),
+        docker=DockerConfig(
+            enabled=docker_enabled,
+            containers=containers_running,
+            compose_stacks=[],
+        ),
+        android=AndroidConfig(adb_server=adb_active),
+    )

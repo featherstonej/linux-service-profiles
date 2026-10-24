@@ -75,8 +75,9 @@ python3 -m venv .venv
    - Press **`s`** to switch to the highlighted profile.
    - Press **`d`** to run a Dry-Run preview.
    - Press **`x`** to stop all active profile services (Idle).
-   - Press **`n`** / **`e`** / **`Delete`** to create, edit, or delete profiles in the built-in Profile Editor.
-   - Inside the Profile Editor, click **"Browse Installed Services & Containers... (Ctrl+B)"** to search installed systemd units and Docker containers and toggle them between **ACTIVE (Start)**, **INACTIVE (Stop)**, and **Unmanaged**.
+   - Press **`n`** / **`e`** / **`c`** / **`m`** / **`Delete`** to create, edit, clone, snapshot running services, or delete profiles in the built-in Profile Editor.
+   - Press **`p`** to pause or resume live 4-second telemetry auto-refresh.
+   - Inside the Profile Editor, click **"Select..."** next to any field to search installed systemd units, Docker containers, Docker Compose stacks, or shell hook presets.
 
 3. **Use CLI Subcommands**:
    ```bash
@@ -84,8 +85,10 @@ python3 -m venv .venv
    srvp switch web-db --dry-run       # Preview what will stop and start
    srvp switch web-db                 # Activate the web-db profile
    srvp status                        # Show live service status, PIDs, CPU %, and RAM
+   srvp snapshot my-current-stack     # Save currently running services/containers as a new profile
    srvp stop                          # Stop active profile services (return to idle)
    srvp validate                      # Validate profiles.yaml syntax and paths
+   srvp --install-completion          # Install dynamic shell tab-completion (bash/zsh/fish)
    ```
 
 4. **Optional Passwordless Switching (Polkit)**:

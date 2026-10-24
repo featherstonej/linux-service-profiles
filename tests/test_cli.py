@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from srvp.cli import app
+from srvp.cli import app, complete_profile_names
+from srvp.config import load_profiles
 
 runner = CliRunner()
 
@@ -47,6 +49,22 @@ def test_cli_init_list_switch_status_stop_validate_polkit(tmp_path: Path) -> Non
     r_status = runner.invoke(app, [*base_args, "status"])
     assert r_status.exit_code == 0
     assert "web-db" in r_status.stdout
+
+    # 4b. snapshot currently running services (postgresql + redis-server) into a new profile
+    r_snap = runner.invoke(
+        app,
+        [*base_args, "snapshot", "captured-dev", "--description", "Captured active dev stack"],
+    )
+    assert r_snap.exit_code == 0
+    assert "captured-dev" in r_snap.stdout
+    loaded_after_snap = load_profiles(cfg)
+    assert "captured-dev" in loaded_after_snap.profiles
+    assert "postgresql.service" in loaded_after_snap.profiles["captured-dev"].systemd.system
+
+    # 4c. verify dynamic shell tab-completion helper
+    fake_ctx = SimpleNamespace(params={"config": cfg}, parent=None)
+    completions = complete_profile_names(fake_ctx, "web")  # type: ignore[arg-type]
+    assert completions == ["web-db"]
 
     # 5. dry-run switch to docker-dev
     r_dry = runner.invoke(app, [*base_args, "switch", "docker-dev", "--dry-run"])

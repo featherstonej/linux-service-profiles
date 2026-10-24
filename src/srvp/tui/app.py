@@ -21,6 +21,7 @@ from textual.widgets import (
 )
 
 from srvp.config import ProfileConfig, load_profiles, save_profiles
+from srvp.discovery import build_snapshot_profile
 from srvp.engine import ProfileEngine
 from srvp.executor import CommandExecutor, MockCommandExecutor, RealCommandExecutor
 from srvp.state import StateManager
@@ -64,7 +65,7 @@ class SrvpApp(App[None]):
     }
     #profile-list {
         height: 1fr;
-        min-height: 6;
+        min-height: 4;
         border: round $surface-lighten-2;
         margin-bottom: 1;
     }
@@ -106,8 +107,11 @@ class SrvpApp(App[None]):
         Binding("x", "stop_all", "Stop All (Idle)"),
         Binding("n", "new_profile", "New Profile"),
         Binding("e", "edit_selected", "Edit Profile"),
+        Binding("c", "clone_selected", "Clone Profile"),
+        Binding("m", "snapshot_running", "Snapshot Running"),
         Binding("delete", "delete_selected", "Delete Profile"),
         Binding("r", "refresh_dashboard", "Refresh Status"),
+        Binding("p", "toggle_auto_refresh", "Pause Auto-Refresh"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -116,11 +120,14 @@ class SrvpApp(App[None]):
         config_path: Path,
         state_path: Path,
         executor: CommandExecutor,
+        auto_refresh_interval: float = 4.0,
     ) -> None:
         super().__init__()
         self.config_path = config_path
         self.state_manager = StateManager(state_path)
         self.executor = executor
+        self.auto_refresh_enabled: bool = True
+        self.auto_refresh_interval: float = auto_refresh_interval
 
         if not self.config_path.exists():
             save_profiles(build_starter_profiles(), self.config_path)
@@ -146,6 +153,9 @@ class SrvpApp(App[None]):
                     yield Button("New (n)", id="btn-new")
                     yield Button("Edit (e)", id="btn-edit")
                     yield Button("Del", id="btn-delete", variant="error")
+                with Horizontal(classes="action-row"):
+                    yield Button("Clone (c)", id="btn-clone")
+                    yield Button("Snapshot (m)", id="btn-snapshot")
             with Vertical(id="main-pane"):
                 yield Static("Select a profile to view details.", id="profile-details")
                 yield DataTable(id="status-table")
@@ -162,16 +172,27 @@ class SrvpApp(App[None]):
         log.write(f"[bold cyan]Loaded configuration:[/bold cyan] {self.config_path}")
         self._rebuild_profile_list()
         self.refresh_views()
+        if self.auto_refresh_interval > 0:
+            self.set_interval(self.auto_refresh_interval, self._on_auto_refresh_tick)
+
+    def _on_auto_refresh_tick(self) -> None:
+        if self.auto_refresh_enabled and len(self.screen_stack) == 1:
+            self.refresh_views()
+
+    def _update_active_banner(self) -> None:
+        state = self.state_manager.load()
+        active_name = state.active_profile
+        auto_str = "[green]ON[/green]" if self.auto_refresh_enabled else "[yellow]PAUSED[/yellow]"
+        banner = self.query_one("#active-banner", Static)
+        active_part = (
+            f"[bold green]{active_name}[/bold green]" if active_name else "[dim]None (Idle)[/dim]"
+        )
+        banner.update(f"Active: {active_part} | Auto: {auto_str}")
 
     def _rebuild_profile_list(self) -> None:
         state = self.state_manager.load()
         active_name = state.active_profile
-        banner = self.query_one("#active-banner", Static)
-        banner.update(
-            f"Active: [bold green]{active_name}[/bold green]"
-            if active_name
-            else "Active: [dim]None (Idle)[/dim]"
-        )
+        self._update_active_banner()
 
         list_view = self.query_one("#profile-list", ListView)
         list_view.clear()
@@ -251,6 +272,10 @@ class SrvpApp(App[None]):
             self.action_new_profile()
         elif btn_id == "btn-edit":
             self.action_edit_selected()
+        elif btn_id == "btn-clone":
+            self.action_clone_selected()
+        elif btn_id == "btn-snapshot":
+            self.action_snapshot_running()
         elif btn_id == "btn-delete":
             self.action_delete_selected()
 
@@ -301,9 +326,34 @@ class SrvpApp(App[None]):
         log = self.query_one("#action-log", RichLog)
         log.write("[dim]Refreshed live service metrics.[/dim]")
 
+    def action_toggle_auto_refresh(self) -> None:
+        self.auto_refresh_enabled = not self.auto_refresh_enabled
+        self._update_active_banner()
+        log = self.query_one("#action-log", RichLog)
+        state_word = "resumed" if self.auto_refresh_enabled else "paused"
+        log.write(f"[cyan]Live auto-refresh {state_word}.[/cyan]")
+
     def action_new_profile(self) -> None:
         self.push_screen(
             ProfileEditorModal(executor=self.executor),
+            self._on_profile_saved_new,
+        )
+
+    def action_clone_selected(self) -> None:
+        if not self.selected_profile or self.selected_profile not in self.profiles_file.profiles:
+            return
+        orig_name = self.selected_profile
+        cloned_prof = self.profiles_file.profiles[orig_name].model_copy(deep=True)
+        candidate_name = f"{orig_name}-copy"
+        self.push_screen(
+            ProfileEditorModal(candidate_name, cloned_prof, executor=self.executor),
+            self._on_profile_saved_new,
+        )
+
+    def action_snapshot_running(self) -> None:
+        snap_prof = build_snapshot_profile(self.executor)
+        self.push_screen(
+            ProfileEditorModal("snapshot-profile", snap_prof, executor=self.executor),
             self._on_profile_saved_new,
         )
 

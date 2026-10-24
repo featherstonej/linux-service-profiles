@@ -19,6 +19,7 @@ from srvp.config import (
     resolve_config_path,
     save_profiles,
 )
+from srvp.discovery import build_snapshot_profile
 from srvp.engine import ProfileEngine, TransitionResult
 from srvp.executor import CommandExecutor, MockCommandExecutor, RealCommandExecutor
 from srvp.polkit import generate_polkit_rules
@@ -30,9 +31,21 @@ app = typer.Typer(
     name="srvp",
     help="Linux Service Profiles (srvp) — Switch and customize Linux service profiles.",
     no_args_is_help=False,
-    add_completion=False,
+    add_completion=True,
 )
 console = Console()
+
+
+def complete_profile_names(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Dynamic shell tab-completion for configured profile names."""
+    try:
+        cfg_param = ctx.params.get("config") if ctx and ctx.params else None
+        if cfg_param is None and ctx.parent and ctx.parent.params:
+            cfg_param = ctx.parent.params.get("config")
+        profiles_file = load_profiles(resolve_config_path(cfg_param))
+        return [name for name in profiles_file.profiles if name.startswith(incomplete)]
+    except Exception:
+        return []
 
 
 @dataclass
@@ -233,7 +246,13 @@ def _render_transition_result(res: TransitionResult) -> None:
 @app.command("switch")
 def cmd_switch(
     ctx: typer.Context,
-    profile_name: Annotated[str, typer.Argument(help="Name of the profile to activate.")],
+    profile_name: Annotated[
+        str,
+        typer.Argument(
+            help="Name of the profile to activate.",
+            autocompletion=complete_profile_names,
+        ),
+    ],
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", "-n", help="Preview transition plan without executing."),
@@ -287,7 +306,12 @@ def cmd_status(
     ctx: typer.Context,
     profile: Annotated[
         str | None,
-        typer.Option("--profile", "-p", help="Inspect services for a specific profile."),
+        typer.Option(
+            "--profile",
+            "-p",
+            help="Inspect services for a specific profile.",
+            autocompletion=complete_profile_names,
+        ),
     ] = None,
 ) -> None:
     """Display active profile state, live service statuses, and CPU/RAM usage."""
@@ -357,6 +381,68 @@ def cmd_validate(ctx: typer.Context) -> None:
     console.print(
         f"[bold green]✓ Configuration is valid[/bold green] "
         f"({len(profiles_file.profiles)} profiles verified in {cli_ctx.config_path})."
+    )
+
+
+@app.command("snapshot")
+def cmd_snapshot(
+    ctx: typer.Context,
+    profile_name: Annotated[
+        str,
+        typer.Argument(help="Name of the new profile to create from currently running services."),
+    ],
+    description: Annotated[
+        str,
+        typer.Option(
+            "--description",
+            "-d",
+            help="Description for the captured snapshot profile.",
+        ),
+    ] = "Snapshot of running machine services and containers.",
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Overwrite if a profile with this name already exists."),
+    ] = False,
+) -> None:
+    """Capture currently running non-core systemd services, containers, and ADB into a new profile."""
+    cli_ctx: CliContext = ctx.obj
+    cleaned = profile_name.strip()
+    if not cleaned or " " in cleaned:
+        console.print(
+            "[bold red]Error:[/bold red] Profile name must be non-empty and contain no spaces."
+        )
+        raise typer.Exit(code=1)
+
+    if cli_ctx.config_path.exists():
+        profiles_file = cli_ctx.load_or_fail()
+    else:
+        profiles_file = build_starter_profiles()
+
+    if cleaned in profiles_file.profiles and not force:
+        console.print(
+            f"[bold yellow]Profile '{cleaned}' already exists.[/bold yellow] "
+            "Pass [bold]--force[/bold] to overwrite it."
+        )
+        raise typer.Exit(code=1)
+
+    executor = cli_ctx.build_executor()
+    snap_profile = build_snapshot_profile(executor, description=description)
+    profiles_file.profiles[cleaned] = snap_profile
+    saved_path = save_profiles(profiles_file, cli_ctx.config_path)
+
+    sys_str = ", ".join(snap_profile.systemd.system) or "none"
+    usr_str = ", ".join(snap_profile.systemd.user) or "none"
+    cnt_str = ", ".join(snap_profile.docker.containers) or "none"
+    console.print(
+        Panel(
+            f"Saved snapshot profile [bold cyan]{cleaned}[/bold cyan] to {saved_path}\n"
+            f"System Units:      [green]{sys_str}[/green]\n"
+            f"User Units:        [green]{usr_str}[/green]\n"
+            f"Docker Containers: [green]{cnt_str}[/green]\n"
+            f"ADB Server:        {'active' if snap_profile.android.adb_server else 'inactive'}",
+            title="srvp Snapshot Captured",
+            border_style="green",
+        )
     )
 
 
