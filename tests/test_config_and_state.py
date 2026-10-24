@@ -16,6 +16,7 @@ from srvp.config import (
     load_profiles,
     normalize_unit_name,
     save_profiles,
+    update_profiles,
 )
 from srvp.polkit import generate_polkit_rules
 from srvp.state import ManagedItem, StateManager
@@ -80,6 +81,23 @@ def test_save_and_load_profiles(tmp_path: Path) -> None:
         "postgresql.service",
         "redis-server.service",
     ]
+
+
+def test_update_profiles_preserves_external_profile_additions(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "profiles.yaml"
+    save_profiles(build_starter_profiles(), cfg_path)
+    cached = load_profiles(cfg_path)
+
+    update_profiles(
+        lambda config: config.profiles.__setitem__("external", ProfileConfig()),
+        cfg_path,
+    )
+    updated = update_profiles(
+        lambda config: config.profiles.__setitem__("from-tui", ProfileConfig()),
+        cfg_path,
+    )
+
+    assert set(updated.profiles) == set(cached.profiles) | {"external", "from-tui"}
 
 
 def test_state_manager_roundtrip_and_corrupt_detection(tmp_path: Path) -> None:

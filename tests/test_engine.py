@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from srvp.config import DockerComposeStack, DockerConfig, ProfileConfig, ProfilesFile
+from srvp.config import (
+    DockerComposeStack,
+    DockerConfig,
+    HooksConfig,
+    ProfileConfig,
+    ProfilesFile,
+    SystemdConfig,
+)
 from srvp.engine import ProfileEngine
 from srvp.executor import CommandResult, MockCommandExecutor
 from srvp.state import StateManager
@@ -315,3 +322,90 @@ def test_failed_start_preserves_previously_tracked_and_partially_started_items(
     # Both previously active postgresql.service and partially started compose stack remain tracked
     assert ("systemd_system", "postgresql.service") in saved_keys
     assert ("docker_compose", "partial-stack") in saved_keys
+
+
+def test_failed_systemd_start_remains_tracked_for_reconciliation(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    starter_profiles.profiles["pending"] = ProfileConfig(
+        systemd=SystemdConfig(system=["slow-start.service"])
+    )
+    original_run = mock_executor.run
+
+    def fail_start(
+        cmd: list[str],
+        *,
+        sudo: bool = False,
+        cwd: str | None = None,
+        shell: bool = False,
+        mutating: bool = True,
+    ) -> CommandResult:
+        if cmd[:2] == ["systemctl", "start"]:
+            result = CommandResult(cmd, 1, stderr="start timed out")
+            mock_executor.history.append(result)
+            return result
+        if cmd[:3] == ["systemctl", "show", "slow-start.service"]:
+            result = CommandResult(
+                cmd,
+                0,
+                stdout="ActiveState=activating\nMainPID=0",
+            )
+            mock_executor.history.append(result)
+            return result
+        return original_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+
+    mock_executor.run = fail_start  # type: ignore[method-assign]
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+
+    assert engine.switch_profile("pending").success is False
+    assert ("systemd_system", "slow-start.service") in {
+        item.key for item in state_manager.load().active_items
+    }
+
+
+def test_failed_post_start_hook_retains_teardown_hooks(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    starter_profiles.profiles["hooked"] = ProfileConfig(
+        systemd=SystemdConfig(system=["service-for-hook.service"]),
+        hooks=HooksConfig(
+            pre_stop=["cleanup-before"],
+            post_start=["fail-after-start"],
+            post_stop=["cleanup-after"],
+        ),
+    )
+    original_run = mock_executor.run
+    hook_calls: list[str] = []
+
+    def fail_post_start(
+        cmd: list[str],
+        *,
+        sudo: bool = False,
+        cwd: str | None = None,
+        shell: bool = False,
+        mutating: bool = True,
+    ) -> CommandResult:
+        if shell:
+            hook_calls.append(cmd[0])
+            if cmd[0] == "fail-after-start":
+                result = CommandResult(cmd, 1, stderr="hook failed")
+                mock_executor.history.append(result)
+                return result
+        return original_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+
+    mock_executor.run = fail_post_start  # type: ignore[method-assign]
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+
+    assert engine.switch_profile("hooked").success is False
+    state = state_manager.load()
+    assert state.active_profile is None
+    assert state.pre_stop_hooks == ["cleanup-before"]
+    assert state.post_stop_hooks == ["cleanup-after"]
+
+    engine.stop_all()
+    assert hook_calls == ["fail-after-start", "cleanup-before", "cleanup-after"]
+    assert "service-for-hook.service" not in mock_executor.active_system_units

@@ -6,6 +6,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -21,7 +22,7 @@ from textual.widgets import (
     Static,
 )
 
-from srvp.config import ProfileConfig, load_profiles, save_profiles
+from srvp.config import ProfileConfig, ProfilesFile, load_profiles, update_profiles
 from srvp.discovery import build_snapshot_profile
 from srvp.engine import ProfileEngine, TransitionPlan, TransitionResult
 from srvp.executor import CommandExecutor, MockCommandExecutor, RealCommandExecutor
@@ -143,7 +144,11 @@ class SrvpApp(App[None]):
         self._transition_in_progress: bool = False
 
         if not self.config_path.exists():
-            save_profiles(build_starter_profiles(), self.config_path)
+            update_profiles(
+                lambda _config: None,
+                self.config_path,
+                initial_config=build_starter_profiles(),
+            )
 
         self.profiles_file = load_profiles(self.config_path)
         self.engine = ProfileEngine(self.profiles_file, self.state_manager, self.executor)
@@ -182,7 +187,7 @@ class SrvpApp(App[None]):
             "Provider", "Service / Item", "Status", "PID", "CPU %", "RAM (MB)", "Details"
         )
         log = self.query_one("#action-log", RichLog)
-        log.write(f"[bold cyan]Loaded configuration:[/bold cyan] {self.config_path}")
+        log.write(f"[bold cyan]Loaded configuration:[/bold cyan] {escape(str(self.config_path))}")
         self._rebuild_profile_list()
         self.refresh_views()
         if self.auto_refresh_interval > 0:
@@ -349,11 +354,14 @@ class SrvpApp(App[None]):
             else:
                 status_tag = "[red]ERR[/red]"
             detail = (
-                f" — [red]{rec.message}[/red]"
+                f" — [red]{escape(rec.message)}[/red]"
                 if (not rec.success and not rec.dry_run and rec.message)
                 else ""
             )
-            log.write(f"  {status_tag} [{rec.action}] {rec.identifier}: {rec.command}{detail}")
+            log.write(
+                f"  {status_tag} {escape(f'[{rec.action}]')} "
+                f"{escape(rec.identifier)}: {escape(rec.command)}{detail}"
+            )
 
     def action_switch_selected(self) -> None:
         if not self.selected_profile:
@@ -378,7 +386,7 @@ class SrvpApp(App[None]):
     def _on_transition_exception(self, context: str, exc: Exception) -> None:
         self._transition_in_progress = False
         log = self.query_one("#action-log", RichLog)
-        log.write(f"[bold red]{context} failed with error: {exc}[/bold red]")
+        log.write(f"[bold red]{escape(context)} failed with error: {escape(str(exc))}[/bold red]")
         self._rebuild_profile_list()
         self.refresh_views()
 
@@ -387,17 +395,17 @@ class SrvpApp(App[None]):
         log = self.query_one("#action-log", RichLog)
         if res.dry_run:
             log.write(
-                f"[bold yellow][DRY-RUN] Preview switch to profile '{target}'[/bold yellow] "
+                f"[bold yellow][DRY-RUN] Preview switch to profile '{escape(target)}'[/bold yellow] "
                 f"({len(res.records)} actions)"
             )
         elif res.success:
             log.write(
-                f"[bold green]Switched to profile '{target}'[/bold green] "
+                f"[bold green]Switched to profile '{escape(target)}'[/bold green] "
                 f"({len(res.records)} actions)"
             )
         else:
             log.write(
-                f"[bold red]Failed to switch to profile '{target}'[/bold red] "
+                f"[bold red]Failed to switch to profile '{escape(target)}'[/bold red] "
                 f"({len(res.records)} actions)"
             )
         self._write_transition_records(log, res)
@@ -434,7 +442,7 @@ class SrvpApp(App[None]):
     def _apply_dry_run_result(self, target: str, res: TransitionResult) -> None:
         self._transition_in_progress = False
         log = self.query_one("#action-log", RichLog)
-        log.write(f"[bold yellow][DRY-RUN] Preview switch to '{target}':[/bold yellow]")
+        log.write(f"[bold yellow][DRY-RUN] Preview switch to '{escape(target)}':[/bold yellow]")
         self._write_transition_records(log, res)
 
     def action_stop_all(self) -> None:
@@ -556,17 +564,24 @@ class SrvpApp(App[None]):
             )
             return
         name, new_prof = result
-        if name in self.profiles_file.profiles:
-            log.write(
-                f"[bold red]Cannot create profile '{name}': a profile with that name already exists.[/bold red]"
-            )
+
+        def add_profile(config: ProfilesFile) -> None:
+            if name in config.profiles:
+                raise ValueError(f"Profile '{name}' already exists.")
+            config.profiles[name] = new_prof
+
+        try:
+            self.profiles_file = update_profiles(add_profile, self.config_path)
+            self.engine.config = self.profiles_file
+        except (ValueError, OSError) as exc:
+            log.write(f"[bold red]Cannot create profile: {escape(str(exc))}[/bold red]")
             return
-        self.profiles_file.profiles[name] = new_prof
-        save_profiles(self.profiles_file, self.config_path)
         self.selected_profile = name
         self._rebuild_profile_list()
         self.refresh_views()
-        log.write(f"[bold green]Saved profile '{name}' to {self.config_path}[/bold green]")
+        log.write(
+            f"[bold green]Saved profile '{escape(name)}' to {escape(str(self.config_path))}[/bold green]"
+        )
 
     def action_edit_selected(self) -> None:
         if self._transition_in_progress:
@@ -588,21 +603,31 @@ class SrvpApp(App[None]):
                 )
                 return
             new_name, updated_prof = result
-            if new_name != orig_name and new_name in self.profiles_file.profiles:
-                log.write(
-                    f"[bold red]Cannot rename '{orig_name}' to '{new_name}': profile '{new_name}' already exists.[/bold red]"
-                )
+
+            def update_profile(config: ProfilesFile) -> None:
+                current = config.profiles.get(orig_name)
+                if current is None:
+                    raise ValueError(f"Profile '{orig_name}' no longer exists.")
+                if current.model_dump() != orig_prof.model_dump():
+                    raise ValueError(f"Profile '{orig_name}' changed since it was opened.")
+                if new_name != orig_name and new_name in config.profiles:
+                    raise ValueError(f"Profile '{new_name}' already exists.")
+                if new_name != orig_name:
+                    config.profiles.pop(orig_name)
+                config.profiles[new_name] = updated_prof
+
+            try:
+                self.profiles_file = update_profiles(update_profile, self.config_path)
+                self.engine.config = self.profiles_file
+            except (ValueError, OSError) as exc:
+                log.write(f"[bold red]Cannot save profile: {escape(str(exc))}[/bold red]")
                 return
-            if new_name != orig_name:
-                self.profiles_file.profiles.pop(orig_name, None)
-            self.profiles_file.profiles[new_name] = updated_prof
-            save_profiles(self.profiles_file, self.config_path)
             if new_name != orig_name:
                 self.state_manager.rename_active_profile(orig_name, new_name)
             self.selected_profile = new_name
             self._rebuild_profile_list()
             self.refresh_views()
-            log.write(f"[bold cyan]Updated profile '{new_name}'.[/bold cyan]")
+            log.write(f"[bold cyan]Updated profile '{escape(new_name)}'.[/bold cyan]")
 
         self.push_screen(
             ProfileEditorModal(
@@ -627,12 +652,14 @@ class SrvpApp(App[None]):
             active_now = self.state_manager.load().active_profile
         except Exception as exc:
             log = self.query_one("#action-log", RichLog)
-            log.write(f"[bold red]Cannot verify active profile state: {exc}[/bold red]")
+            log.write(
+                f"[bold red]Cannot verify active profile state: {escape(str(exc))}[/bold red]"
+            )
             return
         if active_now == target:
             log = self.query_one("#action-log", RichLog)
             log.write(
-                f"[bold red]Cannot delete active profile '{target}'. "
+                f"[bold red]Cannot delete active profile '{escape(target)}'. "
                 "Stop it first (x) or switch to another profile before deleting.[/bold red]"
             )
             return
@@ -649,19 +676,35 @@ class SrvpApp(App[None]):
             try:
                 current_active = self.state_manager.load().active_profile
             except Exception as exc:
-                log.write(f"[bold red]Cannot verify active profile state: {exc}[/bold red]")
+                log.write(
+                    f"[bold red]Cannot verify active profile state: {escape(str(exc))}[/bold red]"
+                )
                 return
             if current_active == target:
                 log.write(
-                    f"[bold red]Cannot delete active profile '{target}'. "
+                    f"[bold red]Cannot delete active profile '{escape(target)}'. "
                     "Stop it first (x) or switch to another profile before deleting.[/bold red]"
                 )
                 return
-            self.profiles_file.profiles.pop(target, None)
-            save_profiles(self.profiles_file, self.config_path)
+            original_profile = self.profiles_file.profiles[target]
+
+            def delete_profile(config: ProfilesFile) -> None:
+                current = config.profiles.get(target)
+                if current is None:
+                    raise ValueError(f"Profile '{target}' no longer exists.")
+                if current.model_dump() != original_profile.model_dump():
+                    raise ValueError(f"Profile '{target}' changed before it could be deleted.")
+                del config.profiles[target]
+
+            try:
+                self.profiles_file = update_profiles(delete_profile, self.config_path)
+                self.engine.config = self.profiles_file
+            except (ValueError, OSError) as exc:
+                log.write(f"[bold red]Cannot delete profile: {escape(str(exc))}[/bold red]")
+                return
             self.selected_profile = next(iter(self.profiles_file.profiles.keys()), None)
             self._rebuild_profile_list()
             self.refresh_views()
-            log.write(f"[bold red]Deleted profile '{target}'.[/bold red]")
+            log.write(f"[bold red]Deleted profile '{escape(target)}'.[/bold red]")
 
         self.push_screen(ConfirmDeleteModal(target), _on_confirmed)

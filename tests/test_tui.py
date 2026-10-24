@@ -5,16 +5,26 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, Input
+from textual.widgets import DataTable, Input, RichLog
 
-from srvp.config import DockerComposeStack, Esp32SerialConfig, load_profiles, save_profiles
+from srvp.config import (
+    DockerComposeStack,
+    Esp32SerialConfig,
+    ProfileConfig,
+    load_profiles,
+    save_profiles,
+    update_profiles,
+)
+from srvp.engine import TransitionPlan, TransitionResult
 from srvp.executor import MockCommandExecutor
+from srvp.providers import ActionRecord
 from srvp.tui.app import SrvpApp
 from srvp.tui.editor import (
     ComposePickerModal,
     HookPickerModal,
     ProfileEditorModal,
     ServicePickerModal,
+    _parse_compose_stacks,
 )
 
 
@@ -56,6 +66,7 @@ async def test_tui_dashboard_switch_dry_run_and_stop(
         # Switch to selected profile (web-db) using keybinding 's'
         await pilot.press("s")
         await pilot.pause()
+
         assert app.state_manager.load().active_profile == "web-db"
         assert "postgresql.service" in mock_executor.active_system_units
 
@@ -283,3 +294,110 @@ async def test_tui_profile_editor_create_and_delete(
         app.screen._validate_and_save()
         await pilot.pause()
         assert "snapshot-profile" in load_profiles(tmp_config_path).profiles
+
+
+def test_compose_editor_does_not_copy_metadata_by_file_only() -> None:
+    existing = [
+        DockerComposeStack(
+            name="api",
+            file="/tmp/project/compose.yml",
+            project_dir="/tmp/project",
+            services=["web", "worker"],
+        ),
+        DockerComposeStack(
+            name="metrics",
+            file="/tmp/project/compose.yml",
+            project_dir="/tmp/project",
+            services=["prometheus"],
+        ),
+    ]
+
+    parsed = _parse_compose_stacks(
+        "api:/tmp/project/compose.yml, "
+        "metrics:/tmp/project/compose.yml, "
+        "new-stack:/tmp/project/compose.yml",
+        existing,
+    )
+    new_stack = parsed[-1]
+    assert new_stack.project_dir is None
+    assert new_stack.services == []
+
+    with pytest.raises(ValueError, match="Ambiguous Compose entry"):
+        _parse_compose_stacks(
+            "api:/tmp/project/compose.yml, renamed:/tmp/project/compose.yml",
+            existing,
+        )
+
+
+@pytest.mark.asyncio
+async def test_profile_editor_fits_80_column_terminal(
+    tmp_config_path: Path,
+    tmp_state_path: Path,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    app = SrvpApp(
+        config_path=tmp_config_path,
+        state_path=tmp_state_path,
+        executor=mock_executor,
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        editor = ProfileEditorModal("narrow", ProfileConfig())
+        app.push_screen(editor)
+        await pilot.pause()
+        dialog = editor.query_one("#editor-dialog")
+        assert dialog.region.width <= 80
+        assert dialog.region.right <= 80
+
+
+@pytest.mark.asyncio
+async def test_transition_log_escapes_dynamic_markup(
+    tmp_config_path: Path,
+    tmp_state_path: Path,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    app = SrvpApp(
+        config_path=tmp_config_path,
+        state_path=tmp_state_path,
+        executor=mock_executor,
+    )
+    result = TransitionResult(
+        plan=TransitionPlan(previous_profile=None, target_profile=None),
+        records=[
+            ActionRecord(
+                action="start[/red]",
+                provider="provider",
+                identifier="service[/red]",
+                command="echo '[/red]'",
+                success=False,
+                message="failure [/red]",
+            )
+        ],
+        dry_run=False,
+    )
+    async with app.run_test() as pilot:
+        log = app.query_one("#action-log", RichLog)
+        app._write_transition_records(log, result)
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_tui_profile_save_merges_external_profile_changes(
+    tmp_config_path: Path,
+    tmp_state_path: Path,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    app = SrvpApp(
+        config_path=tmp_config_path,
+        state_path=tmp_state_path,
+        executor=mock_executor,
+    )
+    async with app.run_test():
+        update_profiles(
+            lambda config: config.profiles.__setitem__("external-snapshot", ProfileConfig()),
+            tmp_config_path,
+        )
+        app._on_profile_saved_new(("new-in-tui", ProfileConfig()))
+
+    profiles = load_profiles(tmp_config_path).profiles
+    assert "external-snapshot" in profiles
+    assert "new-in-tui" in profiles

@@ -7,7 +7,9 @@ import grp
 import json
 import os
 import shlex
+import signal
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -133,13 +135,29 @@ class RealCommandExecutor:
                     return res
 
             if shell:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     full_cmd[0] if len(full_cmd) == 1 else shlex.join(full_cmd),
                     shell=True,
                     cwd=resolved_cwd,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=60,
+                    start_new_session=True,
+                )
+                try:
+                    stdout, stderr = process.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    with suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        stdout, stderr = process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        with suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                        stdout, stderr = process.communicate()
+                    raise
+                completed = subprocess.CompletedProcess(
+                    full_cmd, process.returncode, stdout=stdout, stderr=stderr
                 )
             else:
                 completed = subprocess.run(
@@ -412,6 +430,9 @@ class MockCommandExecutor:
                 elif "down" in cmd:
                     self.active_compose_files.discard(compose_file)
                     stdout = f"Compose stack {compose_file} stopped"
+                elif "rm" in cmd:
+                    self.active_compose_files.discard(compose_file)
+                    stdout = f"Compose services from {compose_file} removed"
                 elif "ps" in cmd:
                     stdout = "running" if compose_file in self.active_compose_files else ""
 

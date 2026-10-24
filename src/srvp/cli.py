@@ -9,6 +9,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -18,6 +19,7 @@ from srvp.config import (
     load_profiles,
     resolve_config_path,
     save_profiles,
+    update_profiles,
 )
 from srvp.discovery import build_snapshot_profile
 from srvp.engine import ProfileEngine, TransitionResult
@@ -224,8 +226,8 @@ def cmd_list(ctx: typer.Context) -> None:
 
 def _render_transition_result(res: TransitionResult) -> None:
     mode_tag = "[bold yellow][DRY-RUN][/bold yellow] " if res.dry_run else ""
-    target_label = res.plan.target_profile or "None (Idle)"
-    prev_label = res.plan.previous_profile or "None"
+    target_label = escape(res.plan.target_profile or "None (Idle)")
+    prev_label = escape(res.plan.previous_profile or "None")
 
     console.print(
         f"{mode_tag}Transition: [bold]{prev_label}[/bold] -> [bold cyan]{target_label}[/bold cyan]"
@@ -245,10 +247,18 @@ def _render_transition_result(res: TransitionResult) -> None:
         result_str = (
             "[yellow]DRY-RUN[/yellow]"
             if rec.dry_run
-            else ("[green]OK[/green]" if rec.success else f"[red]FAIL ({rec.message})[/red]")
+            else (
+                "[green]OK[/green]" if rec.success else f"[red]FAIL ({escape(rec.message)})[/red]"
+            )
         )
         cmd_display = rec.command if rec.action != "check" else rec.message
-        table.add_row(rec.action, rec.provider, rec.identifier, cmd_display, result_str)
+        table.add_row(
+            escape(rec.action),
+            escape(rec.provider),
+            escape(rec.identifier),
+            escape(cmd_display),
+            result_str,
+        )
 
     console.print(table)
 
@@ -449,8 +459,22 @@ def cmd_snapshot(
 
     executor = cli_ctx.build_executor()
     snap_profile = build_snapshot_profile(executor, description=description)
-    profiles_file.profiles[cleaned] = snap_profile
-    saved_path = save_profiles(profiles_file, cli_ctx.config_path)
+
+    def add_snapshot(current: ProfilesFile) -> None:
+        if cleaned in current.profiles and not force:
+            raise ValueError(f"Profile '{cleaned}' already exists.")
+        current.profiles[cleaned] = snap_profile
+
+    try:
+        profiles_file = update_profiles(
+            add_snapshot,
+            cli_ctx.config_path,
+            initial_config=profiles_file,
+        )
+    except ValueError as exc:
+        console.print(f"[bold yellow]{escape(str(exc))}[/bold yellow]")
+        raise typer.Exit(code=1) from exc
+    saved_path = cli_ctx.config_path
 
     sys_str = ", ".join(snap_profile.systemd.system) or "none"
     usr_str = ", ".join(snap_profile.systemd.user) or "none"

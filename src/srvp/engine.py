@@ -132,11 +132,11 @@ class ProfileEngine:
         ):
             items_to_stop_map.setdefault(docker_sock_item.resource_key, docker_sock_item)
 
-        if prev_name != target_profile_name:
+        if prev_name != target_profile_name or (prev_name is None and current_state.active_items):
             if prev_profile is not None:
                 pre_stop = list(prev_profile.hooks.pre_stop)
                 post_stop = list(prev_profile.hooks.post_stop)
-            elif prev_name is not None:
+            elif current_state.active_items:
                 pre_stop = list(current_state.pre_stop_hooks)
                 post_stop = list(current_state.post_stop_hooks)
             else:
@@ -311,13 +311,24 @@ class ProfileEngine:
             else:
                 # Stop phase completed, but target profile startup/hooks failed:
                 # do not mark target profile active, but retain all running/started items.
+                target_prof_obj = (
+                    self.config.profiles.get(plan.target_profile) if plan.target_profile else None
+                )
                 self.state_manager.save(
                     AppState(
                         active_profile=None,
                         activated_at=None,
                         active_items=list(tracked_items.values()),
-                        pre_stop_hooks=[],
-                        post_stop_hooks=[],
+                        pre_stop_hooks=(
+                            list(target_prof_obj.hooks.pre_stop)
+                            if tracked_items and target_prof_obj
+                            else []
+                        ),
+                        post_stop_hooks=(
+                            list(target_prof_obj.hooks.post_stop)
+                            if tracked_items and target_prof_obj
+                            else []
+                        ),
                     )
                 )
 

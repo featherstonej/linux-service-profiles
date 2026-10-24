@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from srvp.config import (
     AndroidConfig,
     DockerComposeStack,
@@ -106,7 +108,39 @@ def test_docker_container_and_compose_providers(mock_executor: MockCommandExecut
     comp_prov.start_items(comp_items, mock_executor)
     assert comp_prov.get_status(comp_items[0], mock_executor).active is True
     comp_prov.stop_items(comp_items, mock_executor)
+    assert mock_executor.history[-1].command == [
+        "docker",
+        "compose",
+        "-f",
+        "/tmp/compose.yml",
+        "rm",
+        "--force",
+        "--stop",
+        "api",
+        "worker",
+    ]
     assert comp_prov.get_status(comp_items[0], mock_executor).active is False
+
+    whole_stack = comp_prov.get_desired_items(
+        ProfileConfig(
+            docker=DockerConfig(
+                compose_stacks=[
+                    DockerComposeStack(
+                        name="whole",
+                        file="/tmp/whole.yml",
+                    )
+                ]
+            )
+        )
+    )
+    comp_prov.stop_items(whole_stack, mock_executor)
+    assert mock_executor.history[-1].command == [
+        "docker",
+        "compose",
+        "-f",
+        "/tmp/whole.yml",
+        "down",
+    ]
 
 
 def test_adb_provider(mock_executor: MockCommandExecutor) -> None:
@@ -206,6 +240,7 @@ def test_real_executor_polkit_without_unconditional_sudo(monkeypatch: object) ->
 
     # ActiveState=reloading is treated as active
     assert _parse_systemctl_show("ActiveState=reloading\nMainPID=1234\n") == (True, 1234)
+    assert _parse_systemctl_show("ActiveState=activating\nMainPID=0\n") == (True, None)
 
     mp = pytest.MonkeyPatch()
     calls: list[list[str]] = []
@@ -229,3 +264,40 @@ def test_real_executor_polkit_without_unconditional_sudo(monkeypatch: object) ->
         assert envs and envs[0].get("LC_ALL") == "C"
     finally:
         mp.undo()
+
+
+def test_shell_timeout_terminates_and_reaps_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import signal
+    import subprocess
+
+    from srvp.executor import RealCommandExecutor
+
+    class TimedOutProcess:
+        pid = 4242
+        returncode = -signal.SIGTERM
+
+        def __init__(self) -> None:
+            self.communicate_calls = 0
+
+        def communicate(self, timeout: int) -> tuple[str, str]:
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired("hook", timeout)
+            return "partial output", ""
+
+    process = TimedOutProcess()
+    popen_kwargs: dict[str, object] = {}
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *args, **kwargs: popen_kwargs.update(kwargs) or process
+    )
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    result = RealCommandExecutor().run(["long-running-hook"], shell=True)
+
+    assert popen_kwargs["start_new_session"] is True
+    assert signals == [(process.pid, signal.SIGTERM)]
+    assert process.communicate_calls == 2
+    assert result.returncode != 0

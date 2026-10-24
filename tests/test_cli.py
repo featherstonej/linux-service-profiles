@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
-from srvp.cli import app, complete_profile_names
+from srvp.cli import _render_transition_result, app, complete_profile_names
 from srvp.config import load_profiles
+from srvp.engine import TransitionPlan, TransitionResult
+from srvp.providers import ActionRecord
 
 runner = CliRunner()
 
@@ -119,3 +123,33 @@ def test_cli_mock_isolates_activation_state_from_real_state(tmp_path: Path) -> N
     assert r_stop.exit_code == 0
     assert real_mgr.load().active_profile == "web-db"
     assert len(real_mgr.load().active_items) == 1
+
+
+def test_transition_result_escapes_untrusted_rich_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = Console(record=True, width=160)
+    monkeypatch.setattr("srvp.cli.console", output)
+    result = TransitionResult(
+        plan=TransitionPlan(
+            previous_profile=None,
+            target_profile="profile[/red]",
+        ),
+        records=[
+            ActionRecord(
+                action="hook[/red]",
+                provider="provider[/red]",
+                identifier="unit[/red]",
+                command="echo '[/red]'",
+                success=False,
+                message="error [/red]",
+            )
+        ],
+        dry_run=False,
+    )
+
+    _render_transition_result(result)
+    rendered = output.export_text()
+    assert "echo '[/red]'" in rendered
+    assert "error [/red]" in rendered
+    assert "unit[/red]" in rendered

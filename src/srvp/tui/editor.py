@@ -69,10 +69,8 @@ def _parse_compose_stacks(
     existing_stacks: list[DockerComposeStack] | None = None,
 ) -> list[DockerComposeStack]:
     by_name_and_file: dict[tuple[str, str], DockerComposeStack] = {}
-    by_file: dict[str, DockerComposeStack] = {}
-    for existing in existing_stacks or []:
-        by_name_and_file[(existing.name, existing.file)] = existing
-        by_file.setdefault(existing.file, existing)
+    for existing_stack in existing_stacks or []:
+        by_name_and_file[(existing_stack.name, existing_stack.file)] = existing_stack
 
     stacks: list[DockerComposeStack] = []
     for part in _split_csv(raw):
@@ -84,14 +82,6 @@ def _parse_compose_stacks(
         clean_name = name.strip()
         clean_file = file_path.strip()
         matched = by_name_and_file.get((clean_name, clean_file))
-        if matched is None:
-            file_matches = [s for s in existing_stacks or [] if s.file == clean_file]
-            if len(file_matches) > 1:
-                raise ValueError(
-                    f"Ambiguous Compose entry '{clean_name}:{clean_file}': "
-                    "multiple existing stacks use this file. Keep the original stack name."
-                )
-            matched = by_file.get(clean_file)
         if matched is not None:
             stacks.append(
                 DockerComposeStack(
@@ -103,6 +93,31 @@ def _parse_compose_stacks(
             )
         else:
             stacks.append(DockerComposeStack(name=clean_name, file=clean_file))
+
+    existing_items = existing_stacks or []
+    existing_by_key = {(stack.name, stack.file): stack for stack in existing_items}
+    parsed_keys = {(stack.name, stack.file) for stack in stacks}
+    removed = [stack for stack in existing_items if (stack.name, stack.file) not in parsed_keys]
+    for index, stack in enumerate(stacks):
+        if (stack.name, stack.file) in existing_by_key:
+            continue
+        renamed_from = [prior for prior in removed if prior.file == stack.file]
+        if not renamed_from:
+            continue
+        same_file_count = sum(prior.file == stack.file for prior in existing_items)
+        if len(renamed_from) > 1 or same_file_count > 1:
+            raise ValueError(
+                f"Ambiguous Compose entry '{stack.name}:{stack.file}': "
+                "multiple existing stacks use this file. Keep the original stack name."
+            )
+        prior = renamed_from[0]
+        stacks[index] = DockerComposeStack(
+            name=stack.name,
+            file=stack.file,
+            project_dir=prior.project_dir,
+            services=list(prior.services),
+        )
+        removed.remove(prior)
     return stacks
 
 
@@ -398,9 +413,6 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         self.existing_by_key: dict[tuple[str, str], DockerComposeStack] = {
             (s.name, s.file): s.model_copy(deep=True) for s in existing_stacks
         }
-        self.existing_by_file: dict[str, DockerComposeStack] = {}
-        for s in existing_stacks:
-            self.existing_by_file.setdefault(s.file, s.model_copy(deep=True))
         self.selected_keys: list[tuple[str, str]] = [(s.name, s.file) for s in existing_stacks]
 
     def compose(self) -> ComposeResult:
@@ -678,7 +690,8 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
         align: center middle;
     }
     #editor-dialog {
-        width: 90;
+        width: 90%;
+        max-width: 90;
         height: 90%;
         border: thick $primary;
         background: $surface;

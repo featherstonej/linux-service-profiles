@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from srvp.config import (
     AndroidConfig,
+    DockerComposeStack,
     DockerConfig,
     ProfileConfig,
     SystemdConfig,
@@ -102,6 +104,10 @@ class DiscoveredService:
     name: str
     machine_state: str
     is_core_os: bool = False
+    compose_project: str | None = None
+    compose_file: str | None = None
+    compose_working_dir: str | None = None
+    compose_service: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -224,26 +230,96 @@ def discover_installed_services(executor: CommandExecutor) -> list[DiscoveredSer
         results.extend(_parse_systemd_units(usr_files.stdout, usr_live.stdout, "systemd_user"))
 
     # 3. Existing Docker containers
-    docker_ps = executor.run(
-        ["docker", "ps", "-a", "--format", "{{.Names}}|{{.State}}"],
-        sudo=False,
-        mutating=False,
-    )
-    if docker_ps.returncode == 0 and docker_ps.stdout.strip():
-        for line in docker_ps.stdout.splitlines():
-            if "|" in line:
-                name, state = line.strip().split("|", 1)
-                if name:
+    if _docker_discovery_is_safe(executor):
+        docker_ps = executor.run(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--format",
+                '{{.Names}}|{{.State}}|{{.Label "com.docker.compose.project"}}|'
+                '{{.Label "com.docker.compose.project.config_files"}}|'
+                '{{.Label "com.docker.compose.project.working_dir"}}|'
+                '{{.Label "com.docker.compose.service"}}',
+            ],
+            sudo=False,
+            mutating=False,
+        )
+        if docker_ps.returncode == 0 and docker_ps.stdout.strip():
+            for line in docker_ps.stdout.splitlines():
+                parts = line.strip().split("|", 5)
+                if parts and parts[0]:
+                    values = parts + [""] * (6 - len(parts))
+                    compose_files = values[3].split(",")
                     results.append(
                         DiscoveredService(
                             category="docker_container",
-                            name=name,
-                            machine_state=state,
-                            is_core_os=False,
+                            name=values[0],
+                            machine_state=values[1],
+                            compose_project=values[2] or None,
+                            compose_file=compose_files[0] or None,
+                            compose_working_dir=values[4] or None,
+                            compose_service=values[5] or None,
                         )
                     )
 
     return results
+
+
+def _docker_discovery_is_safe(executor: CommandExecutor) -> bool:
+    """Avoid connecting to an inactive local Docker socket that may be socket-activated."""
+    if isinstance(executor, MockCommandExecutor):
+        return True
+
+    context = os.environ.get("DOCKER_CONTEXT")
+    host = os.environ.get("DOCKER_HOST")
+    if context:
+        endpoint = executor.run(
+            ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}", context],
+            sudo=False,
+            mutating=False,
+        )
+        if endpoint.returncode != 0:
+            return False
+        host = endpoint.stdout.strip()
+    elif not host:
+        current_context = executor.run(
+            ["docker", "context", "show"],
+            sudo=False,
+            mutating=False,
+        )
+        context = current_context.stdout.strip() if current_context.returncode == 0 else "default"
+        if context and context != "default":
+            endpoint = executor.run(
+                [
+                    "docker",
+                    "context",
+                    "inspect",
+                    "--format",
+                    "{{.Endpoints.docker.Host}}",
+                    context,
+                ],
+                sudo=False,
+                mutating=False,
+            )
+            if endpoint.returncode != 0:
+                return False
+            host = endpoint.stdout.strip()
+
+    if host and not host.startswith("unix://"):
+        return host.startswith(("tcp://", "ssh://"))
+
+    rootless_host = os.environ.get("XDG_RUNTIME_DIR")
+    is_rootless = bool(
+        host and rootless_host and host.removeprefix("unix://").startswith(f"{rootless_host}/")
+    )
+    status_cmd = (
+        ["systemctl", "--user", "is-active", "--quiet", "docker.service"]
+        if is_rootless
+        else ["systemctl", "is-active", "--quiet", "docker.service"]
+    )
+    status = executor.run(status_cmd, sudo=False, mutating=False)
+    return status.returncode == 0
 
 
 @dataclass(frozen=True)
@@ -408,6 +484,7 @@ def build_snapshot_profile(
     sys_running: list[str] = []
     usr_running: list[str] = []
     containers_running: list[str] = []
+    compose_groups: dict[tuple[str, str, str], set[str]] = {}
 
     for item in discovered:
         state_lower = item.machine_state.lower()
@@ -418,11 +495,47 @@ def build_snapshot_profile(
             if state_lower.startswith("active"):
                 usr_running.append(item.name)
         elif item.category == "docker_container" and state_lower.startswith("running"):
-            containers_running.append(item.name)
+            if item.compose_project and item.compose_file:
+                key = (
+                    item.compose_project,
+                    item.compose_file,
+                    item.compose_working_dir or "",
+                )
+                compose_groups.setdefault(key, set())
+                if item.compose_service:
+                    compose_groups[key].add(item.compose_service)
+            else:
+                containers_running.append(item.name)
+
+    projects = [key[0] for key in compose_groups]
+    compose_stacks: list[DockerComposeStack] = []
+    used_names: set[str] = set()
+    for project, compose_file, working_dir in sorted(compose_groups):
+        name = project
+        if projects.count(project) > 1:
+            project_path = working_dir or str(Path(compose_file).parent)
+            name = f"{project}-{Path(project_path).name}"
+        base_name = name
+        suffix = 2
+        while name in used_names:
+            name = f"{base_name}-{suffix}"
+            suffix += 1
+        used_names.add(name)
+        services = sorted(compose_groups[(project, compose_file, working_dir)])
+        compose_stacks.append(
+            DockerComposeStack(
+                name=name,
+                file=compose_file,
+                project_dir=working_dir or None,
+                services=services,
+            )
+        )
 
     adb_res = executor.run(["pgrep", "-x", "adb"], sudo=False, mutating=False)
     adb_active = adb_res.returncode == 0 and bool(adb_res.stdout.strip())
-    docker_enabled = "docker.service" in sys_running or bool(containers_running)
+    docker_enabled = (
+        "docker.service" in sys_running or bool(containers_running) or bool(compose_stacks)
+    )
 
     return ProfileConfig(
         description=description,
@@ -434,7 +547,7 @@ def build_snapshot_profile(
         docker=DockerConfig(
             enabled=docker_enabled,
             containers=containers_running,
-            compose_stacks=[],
+            compose_stacks=compose_stacks,
         ),
         android=AndroidConfig(adb_server=adb_active),
     )

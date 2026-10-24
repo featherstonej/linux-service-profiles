@@ -39,7 +39,7 @@ def _parse_systemctl_show(output: str) -> tuple[bool, int | None]:
     for line in output.splitlines():
         if line.startswith("ActiveState="):
             val = line.split("=", 1)[1].strip()
-            active = val in ("active", "reloading")
+            active = val in ("active", "activating", "reloading")
         elif line.startswith("MainPID="):
             try:
                 parsed_pid = int(line.split("=", 1)[1].strip())

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -326,3 +328,29 @@ def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
             raise
     os.replace(tmp_path, resolved)
     return resolved
+
+
+def update_profiles(
+    update: Callable[[ProfilesFile], None],
+    path: Path | str | None = None,
+    *,
+    initial_config: ProfilesFile | None = None,
+) -> ProfilesFile:
+    """Reload, update, and atomically save profiles under a shared interprocess lock."""
+    resolved = resolve_config_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved.with_name(f"{resolved.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            if resolved.exists():
+                config = load_profiles(resolved)
+            elif initial_config is not None:
+                config = initial_config.model_copy(deep=True)
+            else:
+                raise FileNotFoundError(f"Configuration file not found at '{resolved}'.")
+            update(config)
+            save_profiles(config, resolved)
+            return config
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
