@@ -284,7 +284,10 @@ def test_real_executor_kills_shell_process_group_on_timeout() -> None:
         def communicate(self, timeout: float | None = None) -> tuple[str, str]:
             self.communicate_calls += 1
             if self.communicate_calls < 3:
-                raise subprocess.TimeoutExpired("hook", timeout)
+                raise subprocess.TimeoutExpired(
+                    "hook",
+                    timeout if timeout is not None else 0.0,
+                )
             return "", ""
 
     mp.setattr(subprocess, "Popen", FakeProcess)
