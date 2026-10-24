@@ -10,7 +10,12 @@ from textual.widgets import DataTable, Input
 from srvp.config import load_profiles
 from srvp.executor import MockCommandExecutor
 from srvp.tui.app import SrvpApp
-from srvp.tui.editor import ProfileEditorModal
+from srvp.tui.editor import (
+    ComposePickerModal,
+    HookPickerModal,
+    ProfileEditorModal,
+    ServicePickerModal,
+)
 
 
 @pytest.mark.asyncio
@@ -24,8 +29,25 @@ async def test_tui_dashboard_switch_dry_run_and_stop(
         state_path=tmp_state_path,
         executor=mock_executor,
     )
-    async with app.run_test(size=(120, 40)) as pilot:
+    async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        sidebar = app.query_one("#sidebar")
+        for btn_id in (
+            "#btn-switch",
+            "#btn-dry-run",
+            "#btn-stop-all",
+            "#btn-refresh",
+            "#btn-new",
+            "#btn-edit",
+            "#btn-delete",
+        ):
+            btn = app.query_one(btn_id)
+            assert btn.region.width >= 6, f"{btn_id} width too small: {btn.region}"
+            assert btn.region.height == 3, f"{btn_id} height not 3: {btn.region}"
+            assert btn.region.right <= sidebar.region.right, (
+                f"{btn_id} clipped outside sidebar: {btn.region} vs {sidebar.region}"
+            )
+
         table = app.query_one("#status-table", DataTable)
         assert table.row_count > 0
 
@@ -63,6 +85,63 @@ async def test_tui_profile_editor_create_and_delete(
         app.action_new_profile()
         await pilot.pause()
         assert isinstance(app.screen, ProfileEditorModal)
+
+        # Open per-field Systemd System Units to Start picker
+        app.screen._open_service_picker(
+            input_id="#systemd-system",
+            category="systemd_system",
+            title="Select Systemd System Units to Start (Active)",
+        )
+        await pilot.pause()
+        assert isinstance(app.screen, ServicePickerModal)
+
+        # Verify all installed units are shown by default (Option B)
+        visible_names = [it.name for it in app.screen._visible_items]
+        assert "postgresql.service" in visible_names
+        assert "systemd-journald.service" in visible_names
+
+        # Toggle first visible row and apply to populate #systemd-system
+        app.screen.action_toggle_selected()
+        app.screen._apply_and_close()
+        await pilot.pause()
+
+        assert isinstance(app.screen, ProfileEditorModal)
+        assert app.screen.query_one("#systemd-system", Input).value != ""
+
+        # Open per-field Systemd Units to Ensure Stopped picker
+        app.screen._open_service_picker(
+            input_id="#systemd-stopped",
+            category="systemd_system",
+            title="Select Systemd Units to Ensure Stopped (Inactive)",
+        )
+        await pilot.pause()
+        assert isinstance(app.screen, ServicePickerModal)
+        app.screen.action_toggle_selected()
+        app.screen._apply_and_close()
+        await pilot.pause()
+
+        assert isinstance(app.screen, ProfileEditorModal)
+        assert app.screen.query_one("#systemd-stopped", Input).value != ""
+
+        # Open Docker Compose Picker Modal and select first discovered compose file
+        app.screen._open_compose_picker()
+        await pilot.pause()
+        assert isinstance(app.screen, ComposePickerModal)
+        app.screen.action_toggle_selected()
+        await pilot.click("#btn-compose-apply")
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        assert "webapp-stack:" in app.screen.query_one("#docker-compose", Input).value
+
+        # Open Post-Start Hook Picker Modal and select first preset hook
+        app.screen._open_hook_picker("post_start")
+        await pilot.pause()
+        assert isinstance(app.screen, HookPickerModal)
+        app.screen.action_toggle_selected()
+        await pilot.click("#btn-hook-apply")
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        assert app.screen.query_one("#hooks-post-start", Input).value != ""
 
         # Populate inputs inside ProfileEditorModal
         app.screen.query_one("#profile-name", Input).value = "custom-iot"

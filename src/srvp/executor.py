@@ -264,10 +264,74 @@ class MockCommandExecutor:
                     pid = (abs(hash(unit)) % 8000 + 1000) if unit in target_set else 0
                     state_str = "active" if unit in target_set else "inactive"
                     stdout = f"ActiveState={state_str}\nMainPID={pid}"
+                elif sub == "list-unit-files":
+                    if is_user:
+                        mock_user_units = sorted(
+                            {"syncthing.service", "podman.service"} | self.active_user_units
+                        )
+                        stdout = "\n".join(f"{u} enabled" for u in mock_user_units)
+                    else:
+                        mock_sys_units = sorted(
+                            {
+                                "postgresql.service",
+                                "redis-server.service",
+                                "nginx.service",
+                                "docker.service",
+                                "containerd.service",
+                                "mosquitto.service",
+                                "ModemManager.service",
+                                "brltty.service",
+                                "bluetooth.service",
+                                "cups.service",
+                                "systemd-journald.service",
+                                "dbus.service",
+                                "getty@tty1.service",
+                            }
+                            | self.active_system_units
+                        )
+                        stdout = "\n".join(f"{u} enabled" for u in mock_sys_units)
+                elif sub == "list-units":
+                    if is_user:
+                        mock_user_units = sorted(
+                            {"syncthing.service", "podman.service"} | self.active_user_units
+                        )
+                        stdout = "\n".join(
+                            f"{u} loaded {'active running' if u in self.active_user_units else 'inactive dead'}"
+                            for u in mock_user_units
+                        )
+                    else:
+                        mock_sys_units = sorted(
+                            {
+                                "postgresql.service",
+                                "redis-server.service",
+                                "nginx.service",
+                                "docker.service",
+                                "containerd.service",
+                                "mosquitto.service",
+                                "ModemManager.service",
+                                "brltty.service",
+                                "bluetooth.service",
+                                "cups.service",
+                                "systemd-journald.service",
+                                "dbus.service",
+                                "getty@tty1.service",
+                            }
+                            | self.active_system_units
+                        )
+                        stdout = "\n".join(
+                            f"{u} loaded {'active running' if u in self.active_system_units else 'inactive dead'}"
+                            for u in mock_sys_units
+                        )
 
         # Simulate docker and docker compose
         elif cmd and cmd[0] == "docker":
-            if len(cmd) >= 2 and cmd[1] == "start":
+            if len(cmd) >= 2 and cmd[1] == "ps":
+                mock_containers = sorted({"local-postgres", "local-redis"} | self.active_containers)
+                stdout = "\n".join(
+                    f"{c}|{'running' if c in self.active_containers else 'exited'}"
+                    for c in mock_containers
+                )
+            elif len(cmd) >= 2 and cmd[1] == "start":
                 for c in cmd[2:]:
                     self.active_containers.add(c)
                 stdout = "\n".join(cmd[2:])

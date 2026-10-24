@@ -52,7 +52,7 @@ class SrvpApp(App[None]):
         height: 1fr;
     }
     #sidebar {
-        width: 34;
+        width: 38;
         border-right: solid $primary;
         padding: 1;
     }
@@ -64,15 +64,19 @@ class SrvpApp(App[None]):
     }
     #profile-list {
         height: 1fr;
+        min-height: 6;
         border: round $surface-lighten-2;
         margin-bottom: 1;
     }
     .action-row {
+        width: 100%;
         height: 3;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
     .action-row Button {
         width: 1fr;
+        min-width: 6;
+        padding: 0;
         margin-right: 1;
     }
     #main-pane {
@@ -298,7 +302,10 @@ class SrvpApp(App[None]):
         log.write("[dim]Refreshed live service metrics.[/dim]")
 
     def action_new_profile(self) -> None:
-        self.push_screen(ProfileEditorModal(), self._on_profile_saved_new)
+        self.push_screen(
+            ProfileEditorModal(executor=self.executor),
+            self._on_profile_saved_new,
+        )
 
     def _on_profile_saved_new(self, result: tuple[str, ProfileConfig] | None) -> None:
         if result is None:
@@ -332,7 +339,10 @@ class SrvpApp(App[None]):
             log = self.query_one("#action-log", RichLog)
             log.write(f"[bold cyan]Updated profile '{new_name}'.[/bold cyan]")
 
-        self.push_screen(ProfileEditorModal(orig_name, orig_prof), _on_edited)
+        self.push_screen(
+            ProfileEditorModal(orig_name, orig_prof, executor=self.executor),
+            _on_edited,
+        )
 
     def action_delete_selected(self) -> None:
         if not self.selected_profile or self.selected_profile not in self.profiles_file.profiles:
