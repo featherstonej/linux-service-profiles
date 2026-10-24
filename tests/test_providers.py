@@ -7,6 +7,8 @@ from srvp.config import (
     DockerComposeStack,
     DockerConfig,
     Esp32SerialConfig,
+    LibvirtConfig,
+    PodmanConfig,
     ProfileConfig,
     SystemdConfig,
 )
@@ -16,6 +18,9 @@ from srvp.providers import (
     DockerComposeProvider,
     DockerContainerProvider,
     Esp32SerialProvider,
+    LibvirtVmProvider,
+    PodmanComposeProvider,
+    PodmanContainerProvider,
     SystemdSystemProvider,
     SystemdUserProvider,
     run_hook_commands,
@@ -302,3 +307,47 @@ def test_real_executor_kills_shell_process_group_on_timeout() -> None:
         assert "timed out" in result.stderr
     finally:
         mp.undo()
+
+
+def test_podman_and_libvirt_providers(mock_executor: MockCommandExecutor) -> None:
+    p_cont = PodmanContainerProvider()
+    p_comp = PodmanComposeProvider()
+    vm_prov = LibvirtVmProvider()
+    profile = ProfileConfig(
+        podman=PodmanConfig(
+            containers=["podman-postgres"],
+            compose_stacks=[
+                DockerComposeStack(
+                    name="pod-stack",
+                    file="/tmp/podman-compose.yml",
+                    project_dir="/tmp",
+                )
+            ],
+        ),
+        libvirt=LibvirtConfig(vms=["ubuntu-dev-vm"]),
+    )
+
+    # Podman container lifecycle
+    c_items = p_cont.get_desired_items(profile)
+    assert len(c_items) == 1
+    p_cont.start_items(c_items, mock_executor)
+    assert p_cont.get_status(c_items[0], mock_executor).active is True
+    p_cont.stop_items(c_items, mock_executor)
+    assert p_cont.get_status(c_items[0], mock_executor).active is False
+
+    # Podman compose stack lifecycle
+    comp_items = p_comp.get_desired_items(profile)
+    assert len(comp_items) == 1
+    p_comp.start_items(comp_items, mock_executor)
+    assert p_comp.get_status(comp_items[0], mock_executor).active is True
+    p_comp.stop_items(comp_items, mock_executor)
+    assert p_comp.get_status(comp_items[0], mock_executor).active is False
+
+    # Libvirt VM lifecycle + libvirtd.service auto-inclusion
+    assert "libvirtd.service" in profile.effective_system_units()
+    vm_items = vm_prov.get_desired_items(profile)
+    assert len(vm_items) == 1
+    vm_prov.start_items(vm_items, mock_executor)
+    assert vm_prov.get_status(vm_items[0], mock_executor).active is True
+    vm_prov.stop_items(vm_items, mock_executor)
+    assert vm_prov.get_status(vm_items[0], mock_executor).active is False

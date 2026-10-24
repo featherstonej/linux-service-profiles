@@ -22,6 +22,7 @@ from textual.widgets import (
     Static,
 )
 
+from srvp.automation import PortConflict, detect_port_conflicts
 from srvp.config import (
     ProfileConfig,
     ProfileConflictError,
@@ -264,8 +265,18 @@ class SrvpApp(App[None]):
                 statuses = self.engine.get_profile_statuses(selected)
             except Exception:
                 statuses = []
+            try:
+                conflicts = detect_port_conflicts(prof, self.executor) if prof is not None else []
+            except Exception:
+                conflicts = []
             self.call_from_thread(
-                self._apply_refreshed_views, selected, prof, plan, statuses, active_name
+                self._apply_refreshed_views,
+                selected,
+                prof,
+                plan,
+                statuses,
+                active_name,
+                conflicts,
             )
 
         self.run_worker(_worker, thread=True, exclusive=True, group="status-refresh")
@@ -277,6 +288,7 @@ class SrvpApp(App[None]):
         plan: TransitionPlan | None,
         statuses: list[ServiceStatus],
         active_name: str | None = None,
+        conflicts: list[PortConflict] | None = None,
     ) -> None:
         """Apply refreshed transition preview and status rows on the UI thread."""
         self._sync_active_profile_indicators(active_name)
@@ -286,12 +298,22 @@ class SrvpApp(App[None]):
         if selected and prof is not None and plan is not None:
             to_start = ", ".join(it.identifier for it in plan.items_to_start) or "none"
             to_stop = ", ".join(it.identifier for it in plan.items_to_stop) or "none"
+            resolved_conflicts = (
+                conflicts if conflicts is not None else detect_port_conflicts(prof, self.executor)
+            )
+            conflict_line = (
+                "\n[bold red]Port Conflicts:[/bold red] "
+                + ", ".join(f":{c.port} ({escape(c.bound_by_process)})" for c in resolved_conflicts)
+                if resolved_conflicts
+                else ""
+            )
             details.update(
                 f"[bold]{selected}[/bold] — {prof.description}\n"
                 f"[green]Will Ensure Active:[/green] {to_start}\n"
                 f"[yellow]Will Ensure Stopped:[/yellow] {to_stop}\n"
                 f"[cyan]Hooks:[/cyan] {len(prof.hooks.pre_start)} pre-start, "
                 f"{len(prof.hooks.post_start)} post-start"
+                f"{conflict_line}"
             )
         else:
             details.update("No profile selected.")

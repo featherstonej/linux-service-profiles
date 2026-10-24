@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from srvp.discovery import build_snapshot_profile, discover_installed_services
-from srvp.executor import CommandResult, MockCommandExecutor, ProcessMetrics
+from srvp.executor import (
+    BatteryStatus,
+    CommandResult,
+    ListeningPort,
+    MockCommandExecutor,
+    ProcessMetrics,
+)
 
 
 def test_snapshot_preserves_compose_container_ownership(
@@ -75,6 +81,12 @@ class _DiscoveryExecutor:
 
     def file_exists(self, path: str) -> bool:
         return False
+
+    def get_listening_ports(self) -> list[ListeningPort]:
+        return []
+
+    def get_battery_status(self) -> BatteryStatus:
+        return BatteryStatus(present=False, percent=100.0, power_plugged=True)
 
 
 def test_discovery_does_not_connect_to_inactive_local_docker(
