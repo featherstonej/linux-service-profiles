@@ -83,7 +83,15 @@ def _parse_compose_stacks(
         name, file_path = part.split(":", 1)
         clean_name = name.strip()
         clean_file = file_path.strip()
-        matched = by_name_and_file.get((clean_name, clean_file)) or by_file.get(clean_file)
+        matched = by_name_and_file.get((clean_name, clean_file))
+        if matched is None:
+            file_matches = [s for s in existing_stacks or [] if s.file == clean_file]
+            if len(file_matches) > 1:
+                raise ValueError(
+                    f"Ambiguous Compose entry '{clean_name}:{clean_file}': "
+                    "multiple existing stacks use this file. Keep the original stack name."
+                )
+            matched = by_file.get(clean_file)
         if matched is not None:
             stacks.append(
                 DockerComposeStack(
