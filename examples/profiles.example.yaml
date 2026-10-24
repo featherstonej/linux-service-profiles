@@ -1,0 +1,74 @@
+# Example Linux Service Profiles Configuration
+# Copy to ~/.config/linux-service-profiles/profiles.yaml or run `srvp init`
+
+version: 1
+profiles:
+  web-db:
+    description: "Local PostgreSQL + Redis backend development"
+    systemd:
+      system:
+        - postgresql.service
+        - redis-server.service
+      user: []
+      ensure_stopped:
+        - docker.service
+    hooks:
+      post_start:
+        - "echo 'PostgreSQL and Redis started on default ports.'"
+
+  microservices-compose:
+    description: "Docker Compose multi-service stack"
+    systemd:
+      system:
+        - docker.service
+      ensure_stopped:
+        - postgresql.service
+        - redis-server.service
+    docker:
+      enabled: true
+      containers:
+        - local-mailhog
+      compose_stacks:
+        - name: core-stack
+          file: ~/projects/my-app/docker-compose.yml
+          project_dir: ~/projects/my-app
+          services:
+            - db
+            - api
+            - redis
+
+  android-dev:
+    description: "Android Studio & Emulator workflow (frees host RAM)"
+    systemd:
+      ensure_stopped:
+        - postgresql.service
+        - redis-server.service
+        - docker.service
+    android:
+      adb_server: true
+
+  esp32-embedded:
+    description: "ESP32 / ESP-IDF / PlatformIO serial flashing & monitor"
+    systemd:
+      ensure_stopped:
+        - brltty.service
+        - ModemManager.service
+        - docker.service
+    esp32_serial:
+      enabled: true
+      check_dialout_group: true
+      stop_conflicting_services: true
+      ports_glob:
+        - "/dev/ttyUSB*"
+        - "/dev/ttyACM*"
+
+  idle:
+    description: "Battery saver mode — all development daemons stopped"
+    systemd:
+      ensure_stopped:
+        - postgresql.service
+        - redis-server.service
+        - docker.service
+        - containerd.service
+    android:
+      adb_server: false
