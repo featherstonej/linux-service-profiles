@@ -10,9 +10,11 @@ from textual.widgets import DataTable, Input
 from srvp.config import (
     DockerComposeStack,
     Esp32SerialConfig,
+    ProfileConfig,
+    ProfilesFile,
     load_profiles,
-    profiles_revision,
     save_profiles,
+    update_profiles,
 )
 from srvp.executor import MockCommandExecutor
 from srvp.tui.app import SrvpApp
@@ -225,7 +227,6 @@ async def test_tui_profile_editor_create_and_delete(
             ports_glob=["/dev/ttyACM0"],
         )
         save_profiles(app.profiles_file, tmp_config_path)
-        app._config_revision = profiles_revision(app.profiles_file)
 
         app.selected_profile = "docker-dev"
         app.action_edit_selected()
@@ -290,3 +291,76 @@ async def test_tui_profile_editor_create_and_delete(
         app.screen._validate_and_save()
         await pilot.pause()
         assert "snapshot-profile" in load_profiles(tmp_config_path).profiles
+
+
+@pytest.mark.asyncio
+async def test_tui_writes_preserve_concurrent_config_changes(
+    tmp_config_path: Path,
+    tmp_state_path: Path,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    app = SrvpApp(
+        config_path=tmp_config_path,
+        state_path=tmp_state_path,
+        executor=mock_executor,
+    )
+    async with app.run_test(size=(120, 45)) as pilot:
+        await pilot.pause()
+
+        update_profiles(
+            tmp_config_path,
+            lambda current: current.profiles.__setitem__(
+                "created-externally-before-new", ProfileConfig()
+            ),
+        )
+        app._on_profile_saved_new(("created-in-tui", ProfileConfig()))
+        saved = load_profiles(tmp_config_path)
+        assert "created-externally-before-new" in saved.profiles
+        assert "created-in-tui" in saved.profiles
+
+        app.selected_profile = "docker-dev"
+        app.action_edit_selected()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        app.screen.query_one("#profile-desc", Input).value = "Updated in TUI"
+        update_profiles(
+            tmp_config_path,
+            lambda current: current.profiles.__setitem__(
+                "created-externally-before-edit", ProfileConfig()
+            ),
+        )
+        app.screen._validate_and_save()
+        await pilot.pause()
+        saved = load_profiles(tmp_config_path)
+        assert "created-externally-before-edit" in saved.profiles
+        assert saved.profiles["docker-dev"].description == "Updated in TUI"
+
+        app.selected_profile = "docker-dev"
+        app.action_edit_selected()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        app.screen.query_one("#profile-desc", Input).value = "Stale TUI edit"
+
+        def _change_docker_dev(current: ProfilesFile) -> None:
+            current.profiles["docker-dev"].description = "External concurrent edit"
+
+        update_profiles(tmp_config_path, _change_docker_dev)
+        app.screen._validate_and_save()
+        await pilot.pause()
+        saved = load_profiles(tmp_config_path)
+        assert saved.profiles["docker-dev"].description == "External concurrent edit"
+
+        app.selected_profile = "created-in-tui"
+        app.action_delete_selected()
+        await pilot.pause()
+        update_profiles(
+            tmp_config_path,
+            lambda current: current.profiles.__setitem__(
+                "created-externally-before-delete", ProfileConfig()
+            ),
+        )
+        await pilot.click("#btn-confirm-delete")
+        await pilot.pause()
+        saved = load_profiles(tmp_config_path)
+        assert "created-in-tui" not in saved.profiles
+        assert "created-externally-before-delete" in saved.profiles

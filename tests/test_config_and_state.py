@@ -15,9 +15,8 @@ from srvp.config import (
     SystemdConfig,
     load_profiles,
     normalize_unit_name,
-    profiles_revision,
     save_profiles,
-    save_profiles_if_unchanged,
+    update_profiles,
 )
 from srvp.polkit import generate_polkit_rules
 from srvp.state import ManagedItem, StateManager
@@ -84,23 +83,29 @@ def test_save_and_load_profiles(tmp_path: Path) -> None:
     ]
 
 
-def test_stale_profile_save_is_rejected(tmp_path: Path) -> None:
+def test_profile_update_preserves_concurrent_changes(tmp_path: Path) -> None:
     cfg_path = tmp_path / "profiles.yaml"
     initial = build_starter_profiles(redis_unit="redis-server.service")
     save_profiles(initial, cfg_path)
-    stale = load_profiles(cfg_path)
-    stale_revision = profiles_revision(stale)
 
-    latest = load_profiles(cfg_path)
-    latest.profiles["external-profile"] = ProfileConfig(description="Created by another writer")
-    save_profiles(latest, cfg_path)
+    def _add_external_profile(current: ProfilesFile) -> None:
+        current.profiles["external-profile"] = ProfileConfig(
+            description="Created by another writer"
+        )
 
-    stale.profiles.pop("docker-dev")
-    with pytest.raises(ValueError, match="changed since it was loaded"):
-        save_profiles_if_unchanged(stale, cfg_path, stale_revision)
+    update_profiles(cfg_path, _add_external_profile)
 
-    assert "external-profile" in load_profiles(cfg_path).profiles
-    assert "docker-dev" in load_profiles(cfg_path).profiles
+    update_profiles(
+        cfg_path,
+        lambda current: current.profiles.__setitem__(
+            "tui-profile", ProfileConfig(description="Created in the TUI")
+        ),
+    )
+
+    saved = load_profiles(cfg_path)
+    assert "external-profile" in saved.profiles
+    assert "tui-profile" in saved.profiles
+    assert "docker-dev" in saved.profiles
 
 
 def test_state_manager_roundtrip_and_corrupt_detection(tmp_path: Path) -> None:

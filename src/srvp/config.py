@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
-import hashlib
-import json
 import os
 import tempfile
+from collections.abc import Callable
+from fcntl import LOCK_EX, flock
 from pathlib import Path
 from typing import Any
 
@@ -295,18 +294,36 @@ def load_profiles(path: Path | str | None = None) -> ProfilesFile:
     return ProfilesFile.model_validate(data)
 
 
-class ConfigConflictError(ValueError):
-    """Raised when a configuration file changed since it was loaded."""
+class ProfileConflictError(ValueError):
+    """Raised when a profile changed while an update was being prepared."""
 
 
-def profiles_revision(config: ProfilesFile) -> str:
-    """Return a stable revision identifier for a profiles configuration."""
-    serialized = json.dumps(
-        config.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+def update_profiles(
+    path: Path | str | None,
+    update: Callable[[ProfilesFile], None],
+    *,
+    initial: ProfilesFile | None = None,
+) -> ProfilesFile:
+    """Reload, update, and save profiles while holding an exclusive file lock."""
+    resolved = resolve_config_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved.with_name(f".{resolved.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        flock(lock_file.fileno(), LOCK_EX)
+        existed = resolved.exists()
+        if existed:
+            current = load_profiles(resolved)
+        elif initial is not None:
+            current = initial.model_copy(deep=True)
+        else:
+            raise FileNotFoundError(
+                f"Configuration file not found at '{resolved}'. Run 'srvp init' to generate starter profiles."
+            )
+        previous = current.model_dump(mode="json")
+        update(current)
+        if not existed or previous != current.model_dump(mode="json"):
+            _write_profiles(current, resolved)
+        return current
 
 
 def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
@@ -315,31 +332,8 @@ def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
     resolved.parent.mkdir(parents=True, exist_ok=True)
     lock_path = resolved.with_name(f".{resolved.name}.lock")
     with lock_path.open("a", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        flock(lock_file.fileno(), LOCK_EX)
         _write_profiles(config, resolved)
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    return resolved
-
-
-def save_profiles_if_unchanged(
-    config: ProfilesFile,
-    path: Path | str | None,
-    expected_revision: str | None,
-) -> Path:
-    """Save ProfilesFile only if its on-disk revision still matches the loaded revision."""
-    resolved = resolve_config_path(path)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = resolved.with_name(f".{resolved.name}.lock")
-    with lock_path.open("a", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        current_revision = profiles_revision(load_profiles(resolved)) if resolved.exists() else None
-        if current_revision != expected_revision:
-            raise ConfigConflictError(
-                f"Configuration at '{resolved}' changed since it was loaded. "
-                "Reload it before saving."
-            )
-        _write_profiles(config, resolved)
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     return resolved
 
 
