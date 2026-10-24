@@ -560,6 +560,16 @@ class SrvpApp(App[None]):
             self._on_profile_saved_new,
         )
 
+    def _reload_profiles_after_conflict(self) -> None:
+        """Reload profiles.yaml from disk after a concurrent modification conflict."""
+        try:
+            self.profiles_file = load_profiles(self.config_path)
+            self.engine.config = self.profiles_file
+            self._rebuild_profile_list()
+            self.refresh_views()
+        except Exception:
+            pass
+
     def _on_profile_saved_new(self, result: tuple[str, ProfileConfig] | None) -> None:
         if result is None:
             return
@@ -582,6 +592,7 @@ class SrvpApp(App[None]):
             self.profiles_file = update_profiles(self.config_path, _add)
         except ProfileConflictError as exc:
             log.write(f"[bold red]{escape(str(exc))}[/bold red]")
+            self._reload_profiles_after_conflict()
             return
         self.engine.config = self.profiles_file
         self.selected_profile = name
@@ -631,6 +642,7 @@ class SrvpApp(App[None]):
                 self.profiles_file = update_profiles(self.config_path, _update)
             except ProfileConflictError as exc:
                 log.write(f"[bold red]{escape(str(exc))}[/bold red]")
+                self._reload_profiles_after_conflict()
                 return
             self.engine.config = self.profiles_file
             if new_name != orig_name:
@@ -710,6 +722,7 @@ class SrvpApp(App[None]):
                 self.profiles_file = update_profiles(self.config_path, _delete)
             except ProfileConflictError as exc:
                 log.write(f"[bold red]{escape(str(exc))}[/bold red]")
+                self._reload_profiles_after_conflict()
                 return
             self.engine.config = self.profiles_file
             self.selected_profile = next(iter(self.profiles_file.profiles.keys()), None)

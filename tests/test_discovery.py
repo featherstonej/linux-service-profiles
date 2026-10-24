@@ -84,7 +84,7 @@ def test_discovery_does_not_connect_to_inactive_local_docker(
     monkeypatch.delenv("DOCKER_HOST", raising=False)
     executor = _DiscoveryExecutor()
 
-    discover_installed_services(executor)  # type: ignore[arg-type]
+    discover_installed_services(executor)
 
     assert not any(cmd[:2] == ["docker", "ps"] for cmd in executor.commands)
 
@@ -93,6 +93,6 @@ def test_discovery_allows_remote_docker_endpoint(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("DOCKER_HOST", "tcp://docker.example:2376")
     executor = _DiscoveryExecutor()
 
-    discover_installed_services(executor)  # type: ignore[arg-type]
+    discover_installed_services(executor)
 
     assert any(cmd[:2] == ["docker", "ps"] for cmd in executor.commands)

@@ -32,7 +32,7 @@ srvp switch esp32-embedded
   - **ESP32 / Serial Diagnostics**: Verifies `/dev/ttyUSB*` & `/dev/ttyACM*` device nodes, checks serial group membership (`dialout` on Debian/Ubuntu/Fedora/openSUSE or `uucp` on Arch), and automatically stops conflicting `brltty` and `ModemManager` daemons.
   - **Custom Shell Hooks**: Run `pre_start`, `post_start`, `pre_stop`, and `post_stop` commands on profile transitions.
 - **Batched `sudo` & Polkit Generator**: Batches privileged `systemctl` calls so you only enter your password once per switch, or generates a Polkit rule (`srvp polkit-setup`) for passwordless switching.
-- **Safe `--dry-run` & `--mock` Modes**: Preview every command before executing, or simulate switches in memory.
+- **Safe `--dry-run` & `--mock` Modes**: Preview every command before executing, or simulate switches in memory with isolated mock activation state (`mock_state.json`).
 
 ---
 
@@ -129,6 +129,8 @@ profiles:
       pre_start: []
       post_start:
         - "echo 'Web & DB services are ready.'"
+      pre_stop: []
+      post_stop: []
 ```
 
 ---

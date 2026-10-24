@@ -106,7 +106,8 @@ def test_docker_container_and_compose_providers(mock_executor: MockCommandExecut
     comp_prov.start_items(comp_items, mock_executor)
     assert comp_prov.get_status(comp_items[0], mock_executor).active is True
     comp_prov.stop_items(comp_items, mock_executor)
-    assert mock_executor.history[-1].command == [
+    assert comp_prov.get_status(comp_items[0], mock_executor).active is False
+    assert mock_executor.history[-2].command == [
         "docker",
         "compose",
         "-f",

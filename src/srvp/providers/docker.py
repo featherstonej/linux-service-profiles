@@ -158,13 +158,15 @@ class DockerComposeProvider(ServiceProvider):
         )
 
     def has_running_containers(self, item: ManagedItem, executor: CommandExecutor) -> bool:
-        """Return True if any container belonging to `item`'s Compose file is running."""
+        """Return True if any container belonging to `item`'s Compose stack/services is running."""
         compose_file, project_dir = resolve_compose_paths(
             item.metadata.get("file", ""),
             item.metadata.get("project_dir"),
         )
+        services_csv = item.metadata.get("services", "")
+        services = [s for s in services_csv.split(",") if s]
         res = executor.run(
-            ["docker", "compose", "-f", compose_file, "ps", "--status", "running", "-q"],
+            ["docker", "compose", "-f", compose_file, "ps", "--status", "running", "-q", *services],
             cwd=project_dir,
             sudo=False,
             mutating=False,
