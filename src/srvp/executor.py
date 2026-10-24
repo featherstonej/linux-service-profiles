@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import glob as py_glob
 import grp
 import json
 import os
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -133,13 +135,29 @@ class RealCommandExecutor:
                     return res
 
             if shell:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     full_cmd[0] if len(full_cmd) == 1 else shlex.join(full_cmd),
                     shell=True,
                     cwd=resolved_cwd,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=60,
+                    start_new_session=True,
+                )
+                try:
+                    stdout, stderr = process.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        stdout, stderr = process.communicate(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate()
+                    raise
+                completed = subprocess.CompletedProcess(
+                    full_cmd, process.returncode, stdout, stderr
                 )
             else:
                 completed = subprocess.run(

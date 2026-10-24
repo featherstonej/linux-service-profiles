@@ -258,3 +258,43 @@ def test_real_executor_polkit_without_unconditional_sudo(monkeypatch: object) ->
         assert envs and envs[0].get("LC_ALL") == "C"
     finally:
         mp.undo()
+
+
+def test_real_executor_kills_shell_process_group_on_timeout() -> None:
+    import os
+    import signal
+    import subprocess
+
+    import pytest
+
+    from srvp.executor import RealCommandExecutor
+
+    mp = pytest.MonkeyPatch()
+    signals: list[tuple[int, int]] = []
+    popen_kwargs: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 123
+        returncode = -signal.SIGKILL
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            popen_kwargs.update(kwargs)
+            self.communicate_calls = 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            self.communicate_calls += 1
+            if self.communicate_calls < 3:
+                raise subprocess.TimeoutExpired("hook", timeout)
+            return "", ""
+
+    mp.setattr(subprocess, "Popen", FakeProcess)
+    mp.setattr(os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    try:
+        result = RealCommandExecutor().run(["sleep 999"], shell=True)
+
+        assert popen_kwargs["start_new_session"] is True
+        assert signals == [(123, signal.SIGTERM), (123, signal.SIGKILL)]
+        assert result.returncode == 1
+        assert "timed out" in result.stderr
+    finally:
+        mp.undo()
