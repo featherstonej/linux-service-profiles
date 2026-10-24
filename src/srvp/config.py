@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -292,10 +295,55 @@ def load_profiles(path: Path | str | None = None) -> ProfilesFile:
     return ProfilesFile.model_validate(data)
 
 
+class ConfigConflictError(ValueError):
+    """Raised when a configuration file changed since it was loaded."""
+
+
+def profiles_revision(config: ProfilesFile) -> str:
+    """Return a stable revision identifier for a profiles configuration."""
+    serialized = json.dumps(
+        config.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
     """Serialize and save ProfilesFile to YAML on disk atomically."""
     resolved = resolve_config_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved.with_name(f".{resolved.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        _write_profiles(config, resolved)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return resolved
+
+
+def save_profiles_if_unchanged(
+    config: ProfilesFile,
+    path: Path | str | None,
+    expected_revision: str | None,
+) -> Path:
+    """Save ProfilesFile only if its on-disk revision still matches the loaded revision."""
+    resolved = resolve_config_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved.with_name(f".{resolved.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        current_revision = profiles_revision(load_profiles(resolved)) if resolved.exists() else None
+        if current_revision != expected_revision:
+            raise ConfigConflictError(
+                f"Configuration at '{resolved}' changed since it was loaded. "
+                "Reload it before saving."
+            )
+        _write_profiles(config, resolved)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return resolved
+
+
+def _write_profiles(config: ProfilesFile, resolved: Path) -> None:
     dumped_dict = config.model_dump(mode="json")
     yaml_text = yaml.safe_dump(
         dumped_dict,
@@ -325,4 +373,3 @@ def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
             tmp_path.unlink(missing_ok=True)
             raise
     os.replace(tmp_path, resolved)
-    return resolved

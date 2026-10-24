@@ -14,10 +14,13 @@ from rich.table import Table
 
 from srvp import __version__
 from srvp.config import (
+    ConfigConflictError,
     ProfilesFile,
     load_profiles,
+    profiles_revision,
     resolve_config_path,
     save_profiles,
+    save_profiles_if_unchanged,
 )
 from srvp.discovery import build_snapshot_profile
 from srvp.engine import ProfileEngine, TransitionResult
@@ -437,8 +440,10 @@ def cmd_snapshot(
 
     if cli_ctx.config_path.exists():
         profiles_file = cli_ctx.load_or_fail()
+        expected_revision = profiles_revision(profiles_file)
     else:
         profiles_file = build_starter_profiles()
+        expected_revision = None
 
     if cleaned in profiles_file.profiles and not force:
         console.print(
@@ -450,7 +455,15 @@ def cmd_snapshot(
     executor = cli_ctx.build_executor()
     snap_profile = build_snapshot_profile(executor, description=description)
     profiles_file.profiles[cleaned] = snap_profile
-    saved_path = save_profiles(profiles_file, cli_ctx.config_path)
+    try:
+        saved_path = save_profiles_if_unchanged(
+            profiles_file,
+            cli_ctx.config_path,
+            expected_revision,
+        )
+    except ConfigConflictError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     sys_str = ", ".join(snap_profile.systemd.system) or "none"
     usr_str = ", ".join(snap_profile.systemd.user) or "none"

@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 from textual.widgets import DataTable, Input
 
-from srvp.config import DockerComposeStack, Esp32SerialConfig, load_profiles, save_profiles
+from srvp.config import (
+    DockerComposeStack,
+    Esp32SerialConfig,
+    load_profiles,
+    profiles_revision,
+    save_profiles,
+)
 from srvp.executor import MockCommandExecutor
 from srvp.tui.app import SrvpApp
 from srvp.tui.editor import (
@@ -219,6 +225,7 @@ async def test_tui_profile_editor_create_and_delete(
             ports_glob=["/dev/ttyACM0"],
         )
         save_profiles(app.profiles_file, tmp_config_path)
+        app._config_revision = profiles_revision(app.profiles_file)
 
         app.selected_profile = "docker-dev"
         app.action_edit_selected()

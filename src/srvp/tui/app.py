@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,7 +22,13 @@ from textual.widgets import (
     Static,
 )
 
-from srvp.config import ProfileConfig, load_profiles, save_profiles
+from srvp.config import (
+    ConfigConflictError,
+    ProfileConfig,
+    load_profiles,
+    profiles_revision,
+    save_profiles_if_unchanged,
+)
 from srvp.discovery import build_snapshot_profile
 from srvp.engine import ProfileEngine, TransitionPlan, TransitionResult
 from srvp.executor import CommandExecutor, MockCommandExecutor, RealCommandExecutor
@@ -143,12 +150,28 @@ class SrvpApp(App[None]):
         self._transition_in_progress: bool = False
 
         if not self.config_path.exists():
-            save_profiles(build_starter_profiles(), self.config_path)
+            with suppress(ConfigConflictError):
+                save_profiles_if_unchanged(build_starter_profiles(), self.config_path, None)
 
         self.profiles_file = load_profiles(self.config_path)
+        self._config_revision = profiles_revision(self.profiles_file)
         self.engine = ProfileEngine(self.profiles_file, self.state_manager, self.executor)
         first_names = list(self.profiles_file.profiles.keys())
         self.selected_profile: str | None = first_names[0] if first_names else None
+
+    def _save_profiles(self) -> None:
+        try:
+            save_profiles_if_unchanged(
+                self.profiles_file,
+                self.config_path,
+                self._config_revision,
+            )
+        except ConfigConflictError:
+            latest = load_profiles(self.config_path)
+            self.profiles_file.profiles = latest.profiles
+            self._config_revision = profiles_revision(latest)
+            raise
+        self._config_revision = profiles_revision(self.profiles_file)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -562,7 +585,13 @@ class SrvpApp(App[None]):
             )
             return
         self.profiles_file.profiles[name] = new_prof
-        save_profiles(self.profiles_file, self.config_path)
+        try:
+            self._save_profiles()
+        except ConfigConflictError as exc:
+            log.write(
+                f"[bold yellow]Profile configuration changed; reload before saving: {exc}[/bold yellow]"
+            )
+            return
         self.selected_profile = name
         self._rebuild_profile_list()
         self.refresh_views()
@@ -596,7 +625,13 @@ class SrvpApp(App[None]):
             if new_name != orig_name:
                 self.profiles_file.profiles.pop(orig_name, None)
             self.profiles_file.profiles[new_name] = updated_prof
-            save_profiles(self.profiles_file, self.config_path)
+            try:
+                self._save_profiles()
+            except ConfigConflictError as exc:
+                log.write(
+                    f"[bold yellow]Profile configuration changed; reload before saving: {exc}[/bold yellow]"
+                )
+                return
             if new_name != orig_name:
                 self.state_manager.rename_active_profile(orig_name, new_name)
             self.selected_profile = new_name
@@ -658,7 +693,13 @@ class SrvpApp(App[None]):
                 )
                 return
             self.profiles_file.profiles.pop(target, None)
-            save_profiles(self.profiles_file, self.config_path)
+            try:
+                self._save_profiles()
+            except ConfigConflictError as exc:
+                log.write(
+                    f"[bold yellow]Profile configuration changed; reload before saving: {exc}[/bold yellow]"
+                )
+                return
             self.selected_profile = next(iter(self.profiles_file.profiles.keys()), None)
             self._rebuild_profile_list()
             self.refresh_views()
