@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from srvp.config import ProfilesFile
 
 
@@ -17,11 +19,11 @@ def generate_polkit_rules(config: ProfilesFile, group: str | None = None) -> str
         managed_units.update(profile.effective_ensure_stopped_units())
 
     sorted_units = sorted(managed_units)
-    units_js_array = ",\n        ".join(f'"{u}"' for u in sorted_units)
+    units_js_array = ",\n        ".join(json.dumps(u) for u in sorted_units)
 
     if group:
-        group_comment = f"'{group}' group"
-        group_expr = f'subject.isInGroup("{group}")'
+        group_comment = "configured admin group"
+        group_expr = f"subject.isInGroup({json.dumps(group)})"
     else:
         group_comment = "'sudo' or 'wheel' admin groups"
         group_expr = '(subject.isInGroup("sudo") || subject.isInGroup("wheel"))'

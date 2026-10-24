@@ -8,6 +8,30 @@ from srvp.providers.base import ActionRecord, ServiceProvider, ServiceStatus
 from srvp.state import ManagedItem
 
 
+def _is_unit_confirmed_not_found(
+    unit_name: str,
+    executor: CommandExecutor,
+    *,
+    user: bool = False,
+) -> bool:
+    """Return True if systemd confirms the unit is not-found and inactive."""
+    cmd = ["systemctl"]
+    if user:
+        cmd.append("--user")
+    cmd.extend(["show", unit_name, "--property=LoadState,ActiveState"])
+    res = executor.run(cmd, sudo=False, mutating=False)
+    if res.returncode != 0:
+        return False
+    load_state = ""
+    active_state = ""
+    for line in res.stdout.splitlines():
+        if line.startswith("LoadState="):
+            load_state = line.split("=", 1)[1].strip()
+        elif line.startswith("ActiveState="):
+            active_state = line.split("=", 1)[1].strip()
+    return load_state == "not-found" and active_state in ("inactive", "dead", "")
+
+
 def _parse_systemctl_show(output: str) -> tuple[bool, int | None]:
     """Parse `systemctl show --property=ActiveState,MainPID` output."""
     active = False
@@ -69,35 +93,83 @@ class SystemdSystemProvider(ServiceProvider):
             return []
         unit_names = [it.identifier for it in items]
         res = executor.run(["systemctl", "start", *unit_names], sudo=True, mutating=True)
+        if res.returncode == 0 or res.dry_run:
+            outcomes = [True] * len(items)
+        elif len(items) > 1:
+            active_flags = [self.get_status(it, executor).active for it in items]
+            outcomes = (
+                active_flags
+                if (any(active_flags) and not all(active_flags))
+                else [False] * len(items)
+            )
+        else:
+            outcomes = [False]
         return [
             ActionRecord(
                 action="start",
                 provider=self.provider_name,
                 identifier=u,
                 command=res.command_str,
-                success=res.returncode == 0,
+                success=ok,
                 message=res.stdout or res.stderr,
                 dry_run=res.dry_run,
             )
-            for u in unit_names
+            for u, ok in zip(unit_names, outcomes, strict=True)
         ]
 
     def stop_items(self, items: list[ManagedItem], executor: CommandExecutor) -> list[ActionRecord]:
         if not items:
             return []
-        unit_names = [it.identifier for it in items]
-        res = executor.run(["systemctl", "stop", *unit_names], sudo=True, mutating=True)
+        present_items: list[ManagedItem] = []
+        absent_records: dict[str, ActionRecord] = {}
+        if not executor.is_dry_run:
+            for it in items:
+                if _is_unit_confirmed_not_found(it.identifier, executor, user=False):
+                    absent_records[it.identifier] = ActionRecord(
+                        action="stop",
+                        provider=self.provider_name,
+                        identifier=it.identifier,
+                        command=f"systemctl stop {it.identifier} (not-found)",
+                        success=True,
+                        message="Unit not installed (not-found); already inactive.",
+                        dry_run=False,
+                    )
+                else:
+                    present_items.append(it)
+        else:
+            present_items = list(items)
+
+        batch_records: dict[str, ActionRecord] = {}
+        if present_items:
+            unit_names = [it.identifier for it in present_items]
+            res = executor.run(["systemctl", "stop", *unit_names], sudo=True, mutating=True)
+            if res.returncode == 0 or res.dry_run:
+                outcomes = [True] * len(present_items)
+            elif len(present_items) > 1:
+                active_flags = [self.get_status(it, executor).active for it in present_items]
+                outcomes = (
+                    [not flag for flag in active_flags]
+                    if (any(active_flags) and not all(active_flags))
+                    else [False] * len(present_items)
+                )
+            else:
+                outcomes = [False]
+            for u, ok in zip(unit_names, outcomes, strict=True):
+                batch_records[u] = ActionRecord(
+                    action="stop",
+                    provider=self.provider_name,
+                    identifier=u,
+                    command=res.command_str,
+                    success=ok,
+                    message=res.stdout or res.stderr,
+                    dry_run=res.dry_run,
+                )
+
         return [
-            ActionRecord(
-                action="stop",
-                provider=self.provider_name,
-                identifier=u,
-                command=res.command_str,
-                success=res.returncode == 0,
-                message=res.stdout or res.stderr,
-                dry_run=res.dry_run,
-            )
-            for u in unit_names
+            absent_records[it.identifier]
+            if it.identifier in absent_records
+            else batch_records[it.identifier]
+            for it in items
         ]
 
 
@@ -138,33 +210,83 @@ class SystemdUserProvider(ServiceProvider):
             return []
         unit_names = [it.identifier for it in items]
         res = executor.run(["systemctl", "--user", "start", *unit_names], sudo=False, mutating=True)
+        if res.returncode == 0 or res.dry_run:
+            outcomes = [True] * len(items)
+        elif len(items) > 1:
+            active_flags = [self.get_status(it, executor).active for it in items]
+            outcomes = (
+                active_flags
+                if (any(active_flags) and not all(active_flags))
+                else [False] * len(items)
+            )
+        else:
+            outcomes = [False]
         return [
             ActionRecord(
                 action="start",
                 provider=self.provider_name,
                 identifier=u,
                 command=res.command_str,
-                success=res.returncode == 0,
+                success=ok,
                 message=res.stdout or res.stderr,
                 dry_run=res.dry_run,
             )
-            for u in unit_names
+            for u, ok in zip(unit_names, outcomes, strict=True)
         ]
 
     def stop_items(self, items: list[ManagedItem], executor: CommandExecutor) -> list[ActionRecord]:
         if not items:
             return []
-        unit_names = [it.identifier for it in items]
-        res = executor.run(["systemctl", "--user", "stop", *unit_names], sudo=False, mutating=True)
-        return [
-            ActionRecord(
-                action="stop",
-                provider=self.provider_name,
-                identifier=u,
-                command=res.command_str,
-                success=res.returncode == 0,
-                message=res.stdout or res.stderr,
-                dry_run=res.dry_run,
+        present_items: list[ManagedItem] = []
+        absent_records: dict[str, ActionRecord] = {}
+        if not executor.is_dry_run:
+            for it in items:
+                if _is_unit_confirmed_not_found(it.identifier, executor, user=True):
+                    absent_records[it.identifier] = ActionRecord(
+                        action="stop",
+                        provider=self.provider_name,
+                        identifier=it.identifier,
+                        command=f"systemctl --user stop {it.identifier} (not-found)",
+                        success=True,
+                        message="Unit not installed (not-found); already inactive.",
+                        dry_run=False,
+                    )
+                else:
+                    present_items.append(it)
+        else:
+            present_items = list(items)
+
+        batch_records: dict[str, ActionRecord] = {}
+        if present_items:
+            unit_names = [it.identifier for it in present_items]
+            res = executor.run(
+                ["systemctl", "--user", "stop", *unit_names], sudo=False, mutating=True
             )
-            for u in unit_names
+            if res.returncode == 0 or res.dry_run:
+                outcomes = [True] * len(present_items)
+            elif len(present_items) > 1:
+                active_flags = [self.get_status(it, executor).active for it in present_items]
+                outcomes = (
+                    [not flag for flag in active_flags]
+                    if (any(active_flags) and not all(active_flags))
+                    else [False] * len(present_items)
+                )
+            else:
+                outcomes = [False]
+            for u, ok in zip(unit_names, outcomes, strict=True):
+                batch_records[u] = ActionRecord(
+                    action="stop",
+                    provider=self.provider_name,
+                    identifier=u,
+                    command=res.command_str,
+                    success=ok,
+                    message=res.stdout or res.stderr,
+                    dry_run=res.dry_run,
+                )
+
+        return [
+            absent_records[it.identifier]
+            if it.identifier in absent_records
+            else batch_records[it.identifier]
+            for it in items
         ]

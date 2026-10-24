@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from srvp.config import ProfileConfig
+from srvp.config import ProfileConfig, resolve_compose_paths
 from srvp.executor import CommandExecutor
 from srvp.providers.base import ActionRecord, ServiceProvider, ServiceStatus
 from srvp.state import ManagedItem
@@ -55,17 +55,28 @@ class DockerContainerProvider(ServiceProvider):
             return []
         names = [it.identifier for it in items]
         res = executor.run(["docker", "start", *names], sudo=False, mutating=True)
+        if res.returncode == 0 or res.dry_run:
+            outcomes = [True] * len(items)
+        elif len(items) > 1:
+            active_flags = [self.get_status(it, executor).active for it in items]
+            outcomes = (
+                active_flags
+                if (any(active_flags) and not all(active_flags))
+                else [False] * len(items)
+            )
+        else:
+            outcomes = [False]
         return [
             ActionRecord(
                 action="start",
                 provider=self.provider_name,
                 identifier=name,
                 command=res.command_str,
-                success=res.returncode == 0,
+                success=ok,
                 message=res.stdout or res.stderr,
                 dry_run=res.dry_run,
             )
-            for name in names
+            for name, ok in zip(names, outcomes, strict=True)
         ]
 
     def stop_items(self, items: list[ManagedItem], executor: CommandExecutor) -> list[ActionRecord]:
@@ -73,17 +84,28 @@ class DockerContainerProvider(ServiceProvider):
             return []
         names = [it.identifier for it in items]
         res = executor.run(["docker", "stop", *names], sudo=False, mutating=True)
+        if res.returncode == 0 or res.dry_run:
+            outcomes = [True] * len(items)
+        elif len(items) > 1:
+            active_flags = [self.get_status(it, executor).active for it in items]
+            outcomes = (
+                [not flag for flag in active_flags]
+                if (any(active_flags) and not all(active_flags))
+                else [False] * len(items)
+            )
+        else:
+            outcomes = [False]
         return [
             ActionRecord(
                 action="stop",
                 provider=self.provider_name,
                 identifier=name,
                 command=res.command_str,
-                success=res.returncode == 0,
+                success=ok,
                 message=res.stdout or res.stderr,
                 dry_run=res.dry_run,
             )
-            for name in names
+            for name, ok in zip(names, outcomes, strict=True)
         ]
 
 
@@ -95,9 +117,10 @@ class DockerComposeProvider(ServiceProvider):
     def get_desired_items(self, profile: ProfileConfig) -> list[ManagedItem]:
         items: list[ManagedItem] = []
         for stack in profile.docker.compose_stacks:
-            meta: dict[str, str] = {"file": stack.file}
-            if stack.project_dir:
-                meta["project_dir"] = stack.project_dir
+            resolved_file, resolved_proj = resolve_compose_paths(stack.file, stack.project_dir)
+            meta: dict[str, str] = {"file": resolved_file}
+            if resolved_proj:
+                meta["project_dir"] = resolved_proj
             if stack.services:
                 meta["services"] = ",".join(stack.services)
             items.append(
@@ -110,8 +133,10 @@ class DockerComposeProvider(ServiceProvider):
         return items
 
     def get_status(self, item: ManagedItem, executor: CommandExecutor) -> ServiceStatus:
-        compose_file = item.metadata.get("file", "")
-        project_dir = item.metadata.get("project_dir")
+        compose_file, project_dir = resolve_compose_paths(
+            item.metadata.get("file", ""),
+            item.metadata.get("project_dir"),
+        )
         res = executor.run(
             ["docker", "compose", "-f", compose_file, "ps", "--status", "running", "-q"],
             cwd=project_dir,
@@ -135,8 +160,10 @@ class DockerComposeProvider(ServiceProvider):
     ) -> list[ActionRecord]:
         records: list[ActionRecord] = []
         for item in items:
-            compose_file = item.metadata.get("file", "")
-            project_dir = item.metadata.get("project_dir")
+            compose_file, project_dir = resolve_compose_paths(
+                item.metadata.get("file", ""),
+                item.metadata.get("project_dir"),
+            )
             services_csv = item.metadata.get("services", "")
             services = [s for s in services_csv.split(",") if s]
             cmd = ["docker", "compose", "-f", compose_file, "up", "-d", *services]
@@ -152,13 +179,17 @@ class DockerComposeProvider(ServiceProvider):
                     dry_run=res.dry_run,
                 )
             )
+            if res.returncode != 0:
+                break
         return records
 
     def stop_items(self, items: list[ManagedItem], executor: CommandExecutor) -> list[ActionRecord]:
         records: list[ActionRecord] = []
         for item in items:
-            compose_file = item.metadata.get("file", "")
-            project_dir = item.metadata.get("project_dir")
+            compose_file, project_dir = resolve_compose_paths(
+                item.metadata.get("file", ""),
+                item.metadata.get("project_dir"),
+            )
             cmd = ["docker", "compose", "-f", compose_file, "down"]
             res = executor.run(cmd, cwd=project_dir, sudo=False, mutating=True)
             records.append(
@@ -172,4 +203,6 @@ class DockerComposeProvider(ServiceProvider):
                     dry_run=res.dry_run,
                 )
             )
+            if res.returncode != 0:
+                break
         return records

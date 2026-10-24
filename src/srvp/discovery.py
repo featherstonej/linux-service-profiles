@@ -95,6 +95,9 @@ def _parse_systemd_units(
     live_state: dict[str, str] = {}
     for line in live_units_out.splitlines():
         parts = line.split()
+        # Strip leading status markers such as '●', '×', '○', '*' when --plain is not used
+        while parts and not parts[0].endswith(".service") and len(parts[0]) <= 2:
+            parts = parts[1:]
         # Standard columns: UNIT LOAD ACTIVE SUB DESCRIPTION...
         if len(parts) >= 4 and parts[0].endswith(".service"):
             unit = parts[0]
@@ -140,12 +143,27 @@ def discover_installed_services(executor: CommandExecutor) -> list[DiscoveredSer
 
     # 1. System-level systemd services
     sys_files = executor.run(
-        ["systemctl", "list-unit-files", "--type=service", "--no-legend", "--no-pager"],
+        [
+            "systemctl",
+            "list-unit-files",
+            "--type=service",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+        ],
         sudo=False,
         mutating=False,
     )
     sys_live = executor.run(
-        ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--no-pager"],
+        [
+            "systemctl",
+            "list-units",
+            "--type=service",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+        ],
         sudo=False,
         mutating=False,
     )
@@ -154,7 +172,15 @@ def discover_installed_services(executor: CommandExecutor) -> list[DiscoveredSer
 
     # 2. User-level systemd services
     usr_files = executor.run(
-        ["systemctl", "--user", "list-unit-files", "--type=service", "--no-legend", "--no-pager"],
+        [
+            "systemctl",
+            "--user",
+            "list-unit-files",
+            "--type=service",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+        ],
         sudo=False,
         mutating=False,
     )
@@ -165,6 +191,7 @@ def discover_installed_services(executor: CommandExecutor) -> list[DiscoveredSer
             "list-units",
             "--type=service",
             "--all",
+            "--plain",
             "--no-legend",
             "--no-pager",
         ],

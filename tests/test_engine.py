@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from srvp.config import DockerComposeStack, ProfilesFile
+from srvp.config import DockerComposeStack, DockerConfig, ProfileConfig, ProfilesFile
 from srvp.engine import ProfileEngine
-from srvp.executor import MockCommandExecutor
+from srvp.executor import CommandResult, MockCommandExecutor
 from srvp.state import StateManager
 
 
@@ -75,3 +75,181 @@ def test_validate_config_detects_missing_compose_and_overlap(
     assert len(warnings) == 2
     assert any("postgresql.service" in w for w in warnings)
     assert any("missing-stack" in w for w in warnings)
+
+
+def test_compose_metadata_change_stops_old_stack_before_starting_new(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    starter_profiles.profiles["stack-a"] = ProfileConfig(
+        docker=DockerConfig(
+            enabled=True,
+            compose_stacks=[DockerComposeStack(name="app", file="/tmp/a/compose.yml")],
+        )
+    )
+    starter_profiles.profiles["stack-b"] = ProfileConfig(
+        docker=DockerConfig(
+            enabled=True,
+            compose_stacks=[DockerComposeStack(name="app", file="/tmp/b/compose.yml")],
+        )
+    )
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+
+    engine.switch_profile("stack-a")
+    assert "/tmp/a/compose.yml" in mock_executor.active_compose_files
+
+    engine.switch_profile("stack-b")
+    assert "/tmp/a/compose.yml" not in mock_executor.active_compose_files
+    assert "/tmp/b/compose.yml" in mock_executor.active_compose_files
+
+
+def test_failed_stop_aborts_dependent_shutdown_and_preserves_state(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    starter_profiles.profiles["docker-dev"].docker.containers = ["app-container"]
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+
+    res1 = engine.switch_profile("docker-dev")
+    assert res1.success is True
+    assert "docker.service" in mock_executor.active_system_units
+    assert "app-container" in mock_executor.active_containers
+
+    orig_run = mock_executor.run
+
+    def fail_container_stop(
+        cmd: list[str],
+        *,
+        sudo: bool = False,
+        cwd: str | None = None,
+        shell: bool = False,
+        mutating: bool = True,
+    ) -> CommandResult:
+        if cmd[:2] == ["docker", "stop"]:
+            res = CommandResult(
+                command=cmd,
+                returncode=1,
+                stdout="",
+                stderr="Failed to stop container",
+                dry_run=False,
+            )
+            mock_executor.history.append(res)
+            return res
+        return orig_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+
+    mock_executor.run = fail_container_stop  # type: ignore[method-assign]
+
+    # Switching to web-db should fail during docker_container stop, aborting docker.service stop
+    # and aborting web-db startup.
+    res2 = engine.switch_profile("web-db")
+    assert res2.success is False
+    assert "docker.service" in mock_executor.active_system_units
+    assert "postgresql.service" not in mock_executor.active_system_units
+    saved = state_manager.load()
+    assert saved.active_profile == "docker-dev"
+    assert ("docker_container", "app-container") in {it.key for it in saved.active_items}
+
+
+def test_partial_batch_outcomes_reconciled_in_state(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+    engine.switch_profile("web-db")
+
+    orig_run = mock_executor.run
+
+    def partial_stop(
+        cmd: list[str],
+        *,
+        sudo: bool = False,
+        cwd: str | None = None,
+        shell: bool = False,
+        mutating: bool = True,
+    ) -> CommandResult:
+        if cmd[:2] == ["systemctl", "stop"]:
+            # Simulate postgresql stopping while redis-server fails to stop
+            mock_executor.active_system_units.discard("postgresql.service")
+            res = CommandResult(
+                command=["sudo", *cmd] if sudo else cmd,
+                returncode=1,
+                stdout="",
+                stderr="Failed to stop redis-server.service",
+                dry_run=False,
+            )
+            mock_executor.history.append(res)
+            return res
+        return orig_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+
+    mock_executor.run = partial_stop  # type: ignore[method-assign]
+    stop_res = engine.stop_all()
+    assert stop_res.success is False
+    saved = state_manager.load()
+    assert saved.active_profile == "web-db"
+    remaining_ids = [it.identifier for it in saved.active_items]
+    assert "postgresql.service" not in remaining_ids
+    assert "redis-server.service" in remaining_ids
+
+
+def test_transition_serialized_with_interprocess_flock(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    import fcntl
+
+    import pytest
+
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+    orig_run = mock_executor.run
+    observed_locked_during_exec = False
+
+    def check_lock_during_run(
+        cmd: list[str],
+        *,
+        sudo: bool = False,
+        cwd: str | None = None,
+        shell: bool = False,
+        mutating: bool = True,
+    ) -> CommandResult:
+        nonlocal observed_locked_during_exec
+        with state_manager.lock_path.open("a+", encoding="utf-8") as probe:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed_locked_during_exec = True
+        return orig_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+
+    mock_executor.run = check_lock_during_run  # type: ignore[method-assign]
+    engine.switch_profile("web-db")
+    assert observed_locked_during_exec is True
+
+
+def test_stop_uses_activation_snapshot_and_compose_resolves_relative_paths(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+    engine.switch_profile("web-db")
+
+    # Simulate nginx.service running externally and user editing web-db config without re-applying
+    mock_executor.active_system_units.add("nginx.service")
+    starter_profiles.profiles["web-db"].systemd.system.append("nginx.service")
+
+    engine.stop_all()
+    # nginx.service was not part of the recorded activation snapshot, so it must stay running
+    assert "nginx.service" in mock_executor.active_system_units
+
+    # Verify validate_config resolves relative compose file against project_dir (with ~ expansion)
+    mock_executor.existing_files.add("/tmp/myproj/docker-compose.yml")
+    starter_profiles.profiles["docker-dev"].docker.compose_stacks = [
+        DockerComposeStack(
+            name="rel-stack",
+            file="docker-compose.yml",
+            project_dir="/tmp/myproj",
+        )
+    ]
+    assert engine.validate_config() == []

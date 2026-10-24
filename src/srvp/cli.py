@@ -57,6 +57,11 @@ class CliContext:
     mock: bool
     dry_run: bool
 
+    def __post_init__(self) -> None:
+        if self.mock or os.environ.get("SRVP_MOCK") == "1":
+            self.mock = True
+            self.state_path = resolve_state_path(self.state_path, mock=True)
+
     def build_executor(self, override_dry_run: bool = False) -> CommandExecutor:
         effective_dry = self.dry_run or override_dry_run
         if self.mock or os.environ.get("SRVP_MOCK") == "1":
@@ -119,10 +124,11 @@ def main_callback(
     ] = None,
 ) -> None:
     """Manage Linux development service profiles via CLI or interactive TUI."""
+    effective_mock = mock or os.environ.get("SRVP_MOCK") == "1"
     cli_ctx = CliContext(
         config_path=resolve_config_path(config),
-        state_path=resolve_state_path(state),
-        mock=mock,
+        state_path=resolve_state_path(state, mock=effective_mock),
+        mock=effective_mock,
         dry_run=dry_run,
     )
     ctx.obj = cli_ctx
@@ -473,7 +479,7 @@ def cmd_polkit_setup(
         out_path.write_text(rules_text, encoding="utf-8")
         console.print(f"[bold green]Wrote Polkit rules to:[/bold green] {out_path}")
     else:
-        console.print(rules_text)
+        typer.echo(rules_text, nl=not rules_text.endswith("\n"))
 
 
 def main() -> None:

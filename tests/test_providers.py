@@ -144,3 +144,77 @@ def test_esp32_serial_provider_and_hooks(mock_executor: MockCommandExecutor) -> 
     hook_recs = run_hook_commands("post_start", ["echo hello"], mock_executor)
     assert len(hook_recs) == 1
     assert hook_recs[0].success is True
+
+
+def test_systemd_stop_ignores_not_found_units_and_discovery_parses_failed_markers(
+    mock_executor: MockCommandExecutor,
+) -> None:
+    import os
+
+    from srvp.discovery import _parse_systemd_units
+    from srvp.executor import RealCommandExecutor
+
+    provider = SystemdSystemProvider()
+    mock_executor.not_found_units.add("brltty.service")
+    mock_executor.active_system_units.add("ModemManager.service")
+
+    profile = ProfileConfig(
+        systemd=SystemdConfig(ensure_stopped=["brltty.service", "ModemManager.service"])
+    )
+    stop_items = provider.get_explicit_stop_items(profile)
+    records = provider.stop_items(stop_items, mock_executor)
+    assert len(records) == 2
+    assert all(r.success for r in records)
+    # Only ModemManager.service should be passed to sudo systemctl stop
+    assert mock_executor.history[-1].command == [
+        "sudo",
+        "systemctl",
+        "stop",
+        "ModemManager.service",
+    ]
+
+    # Verify _parse_systemd_units strips '●' marker on failed units
+    parsed = _parse_systemd_units(
+        "postgresql.service enabled\n",
+        "● postgresql.service loaded failed failed PostgreSQL RDBMS\n"
+        "● transient-job.service loaded failed failed Transient failed unit\n",
+        "systemd_system",
+    )
+    by_name = {d.name: d.machine_state for d in parsed}
+    assert by_name["postgresql.service"] == "failed (failed)"
+    assert by_name["transient-job.service"] == "failed (failed)"
+
+    # Verify RealCommandExecutor reuses psutil.Process per PID
+    real_exec = RealCommandExecutor(dry_run=True)
+    pid = os.getpid()
+    m1 = real_exec.get_process_metrics(pid)
+    proc_ref = real_exec._proc_cache.get(pid)
+    m2 = real_exec.get_process_metrics(pid)
+    assert m1.pid == pid and m2.pid == pid
+    assert real_exec._proc_cache.get(pid) is proc_ref
+
+
+def test_real_executor_polkit_without_unconditional_sudo(monkeypatch: object) -> None:
+    import subprocess
+    from types import SimpleNamespace
+
+    import pytest
+
+    from srvp.executor import RealCommandExecutor
+
+    mp = pytest.MonkeyPatch()
+    calls: list[list[str]] = []
+
+    def fake_run_polkit_ok(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    mp.setattr(subprocess, "run", fake_run_polkit_ok)
+    try:
+        real_exec = RealCommandExecutor(dry_run=False)
+        res = real_exec.run(["systemctl", "start", "postgresql.service"], sudo=True)
+        assert res.returncode == 0
+        # Should succeed via systemctl --no-ask-password without calling sudo
+        assert calls == [["systemctl", "--no-ask-password", "start", "postgresql.service"]]
+    finally:
+        mp.undo()

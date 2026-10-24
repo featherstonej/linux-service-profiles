@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -33,15 +35,45 @@ def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def _split_semicolon(raw: str) -> list[str]:
-    return [item.strip() for item in raw.split(";") if item.strip()]
+def _format_hook_commands(commands: list[str]) -> str:
+    """Losslessly serialize a list of shell commands for display in an Input widget."""
+    cleaned = [cmd.strip() for cmd in commands if cmd.strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1 and not cleaned[0].startswith("[") and "\n" not in cleaned[0]:
+        return cleaned[0]
+    return json.dumps(cleaned)
+
+
+def _parse_hook_commands(raw: str) -> list[str]:
+    """Losslessly parse shell commands from an Input widget without splitting on semicolons."""
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    if stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                return [x.strip() for x in parsed if x.strip()]
+        except json.JSONDecodeError:
+            pass
+    return [line.strip() for line in stripped.splitlines() if line.strip()]
 
 
 def _format_compose_stacks(stacks: list[DockerComposeStack]) -> str:
     return ", ".join(f"{s.name}:{s.file}" for s in stacks)
 
 
-def _parse_compose_stacks(raw: str) -> list[DockerComposeStack]:
+def _parse_compose_stacks(
+    raw: str,
+    existing_stacks: list[DockerComposeStack] | None = None,
+) -> list[DockerComposeStack]:
+    by_name_and_file: dict[tuple[str, str], DockerComposeStack] = {}
+    by_file: dict[str, DockerComposeStack] = {}
+    for existing in existing_stacks or []:
+        by_name_and_file[(existing.name, existing.file)] = existing
+        by_file.setdefault(existing.file, existing)
+
     stacks: list[DockerComposeStack] = []
     for part in _split_csv(raw):
         if ":" not in part:
@@ -49,7 +81,20 @@ def _parse_compose_stacks(raw: str) -> list[DockerComposeStack]:
                 f"Invalid Compose entry '{part}'. Expected format 'name:/path/to/compose.yml'."
             )
         name, file_path = part.split(":", 1)
-        stacks.append(DockerComposeStack(name=name.strip(), file=file_path.strip()))
+        clean_name = name.strip()
+        clean_file = file_path.strip()
+        matched = by_name_and_file.get((clean_name, clean_file)) or by_file.get(clean_file)
+        if matched is not None:
+            stacks.append(
+                DockerComposeStack(
+                    name=clean_name,
+                    file=clean_file,
+                    project_dir=matched.project_dir,
+                    services=list(matched.services),
+                )
+            )
+        else:
+            stacks.append(DockerComposeStack(name=clean_name, file=clean_file))
     return stacks
 
 
@@ -122,10 +167,7 @@ class ServicePickerModal(ModalScreen[list[str] | None]):
         self.executor = executor
         self.category = category
         self.title_text = title
-        all_discovered = discover_installed_services(executor)
-        self.discovered: list[DiscoveredService] = [
-            d for d in all_discovered if d.category == category
-        ]
+        self.discovered: list[DiscoveredService] = []
         self.search_query: str = ""
         # Show all installed units by default (Option B), with optional checkbox to hide core OS units
         self.hide_core_os: bool = False
@@ -142,19 +184,14 @@ class ServicePickerModal(ModalScreen[list[str] | None]):
                 else cleaned
             )
             self.selected_names.add(norm)
-
-        known_names = {d.name for d in self.discovered}
-        for name in sorted(self.selected_names):
-            if name not in known_names:
-                self.discovered.insert(
-                    0,
-                    DiscoveredService(
-                        category=category,
-                        name=name,
-                        machine_state="configured",
-                        is_core_os=False,
-                    ),
+            self.discovered.append(
+                DiscoveredService(
+                    category=category,
+                    name=norm,
+                    machine_state="configured",
+                    is_core_os=False,
                 )
+            )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="picker-dialog"):
@@ -192,6 +229,30 @@ class ServicePickerModal(ModalScreen[list[str] | None]):
         )
         self._refresh_table()
         table.focus()
+
+        def _worker() -> None:
+            all_discovered = discover_installed_services(self.executor)
+            cat_items = [d for d in all_discovered if d.category == self.category]
+            self.app.call_from_thread(self._on_discovered_loaded, cat_items)
+
+        self.run_worker(_worker, thread=True, exclusive=True, group="picker-discovery")
+
+    def _on_discovered_loaded(self, cat_items: list[DiscoveredService]) -> None:
+        known_names = {d.name for d in cat_items}
+        merged = list(cat_items)
+        for name in sorted(self.selected_names):
+            if name not in known_names:
+                merged.insert(
+                    0,
+                    DiscoveredService(
+                        category=self.category,
+                        name=name,
+                        machine_state="configured",
+                        is_core_os=False,
+                    ),
+                )
+        self.discovered = merged
+        self._refresh_table()
 
     def _refresh_table(self, preserve_cursor: int | None = None) -> None:
         table = self.query_one("#picker-table", DataTable)
@@ -322,16 +383,14 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         existing_stacks: list[DockerComposeStack],
     ) -> None:
         super().__init__()
-        self.discovered: list[DiscoveredComposeFile] = discover_compose_files(executor)
+        self.executor = executor
+        self.discovered: list[DiscoveredComposeFile] = [
+            DiscoveredComposeFile(stack_name=s.name, file_path=s.file) for s in existing_stacks
+        ]
+        self.existing_by_file: dict[str, DockerComposeStack] = {
+            s.file: s.model_copy(deep=True) for s in existing_stacks
+        }
         self.selected_files: dict[str, str] = {s.file: s.name for s in existing_stacks}
-
-        known_files = {d.file_path for d in self.discovered}
-        for s in existing_stacks:
-            if s.file not in known_files:
-                self.discovered.insert(
-                    0,
-                    DiscoveredComposeFile(stack_name=s.name, file_path=s.file),
-                )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="compose-picker-dialog"):
@@ -361,6 +420,21 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         table.add_columns("Selected", "Stack Name", "Compose File Path")
         self._refresh_table()
         table.focus()
+
+        def _worker() -> None:
+            found = discover_compose_files(self.executor)
+            self.app.call_from_thread(self._on_compose_discovered, found)
+
+        self.run_worker(_worker, thread=True, exclusive=True, group="compose-discovery")
+
+    def _on_compose_discovered(self, found: list[DiscoveredComposeFile]) -> None:
+        known_files = {d.file_path for d in found}
+        merged = list(found)
+        for fpath, name in self.selected_files.items():
+            if fpath not in known_files:
+                merged.insert(0, DiscoveredComposeFile(stack_name=name, file_path=fpath))
+        self.discovered = merged
+        self._refresh_table()
 
     def _refresh_table(self, preserve_cursor: int | None = None) -> None:
         table = self.query_one("#compose-table", DataTable)
@@ -411,10 +485,20 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         elif bid == "btn-compose-cancel":
             self.dismiss(None)
         elif bid == "btn-compose-apply":
-            result = [
-                DockerComposeStack(name=name, file=fpath)
-                for fpath, name in self.selected_files.items()
-            ]
+            result: list[DockerComposeStack] = []
+            for fpath, name in self.selected_files.items():
+                prior = self.existing_by_file.get(fpath)
+                if prior is not None:
+                    result.append(
+                        DockerComposeStack(
+                            name=name,
+                            file=fpath,
+                            project_dir=prior.project_dir,
+                            services=list(prior.services),
+                        )
+                    )
+                else:
+                    result.append(DockerComposeStack(name=name, file=fpath))
             self.dismiss(result)
 
 
@@ -620,11 +704,26 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
         profile_name: str = "",
         profile: ProfileConfig | None = None,
         executor: CommandExecutor | None = None,
+        *,
+        existing_names: set[str] | None = None,
+        editing_name: str | None = None,
     ) -> None:
         super().__init__()
         self.initial_name = profile_name
         self.initial_profile = profile or ProfileConfig()
         self.executor: CommandExecutor = executor or MockCommandExecutor()
+        self.existing_names: set[str] | None = (
+            set(existing_names) if existing_names is not None else None
+        )
+        self.editing_name: str | None = editing_name
+        self.compose_stacks: list[DockerComposeStack] = [
+            s.model_copy(deep=True) for s in self.initial_profile.docker.compose_stacks
+        ]
+        self._rendered_compose_stacks: str = _format_compose_stacks(self.compose_stacks)
+        self.pre_start_hooks: list[str] = list(self.initial_profile.hooks.pre_start)
+        self.post_start_hooks: list[str] = list(self.initial_profile.hooks.post_start)
+        self._rendered_pre_start: str = _format_hook_commands(self.pre_start_hooks)
+        self._rendered_post_start: str = _format_hook_commands(self.post_start_hooks)
 
     def compose(self) -> ComposeResult:
         p = self.initial_profile
@@ -698,7 +797,7 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
             )
             with Horizontal(classes="input-with-picker"):
                 yield Input(
-                    value=_format_compose_stacks(p.docker.compose_stacks),
+                    value=self._rendered_compose_stacks,
                     placeholder="e.g., api:~/proj/docker-compose.yml",
                     id="docker-compose",
                 )
@@ -716,19 +815,19 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
                 id="esp32-enabled",
             )
 
-            yield Label("Pre-Start Shell Hooks (semicolon-separated):", classes="field-label")
+            yield Label("Pre-Start Shell Hooks:", classes="field-label")
             with Horizontal(classes="input-with-picker"):
                 yield Input(
-                    value="; ".join(p.hooks.pre_start),
+                    value=self._rendered_pre_start,
                     placeholder="e.g., echo 'Preparing environment'",
                     id="hooks-pre-start",
                 )
                 yield Button("Select...", id="btn-pick-pre-hooks", variant="primary")
 
-            yield Label("Post-Start Shell Hooks (semicolon-separated):", classes="field-label")
+            yield Label("Post-Start Shell Hooks:", classes="field-label")
             with Horizontal(classes="input-with-picker"):
                 yield Input(
-                    value="; ".join(p.hooks.post_start),
+                    value=self._rendered_post_start,
                     placeholder="e.g., echo 'Profile active'",
                     id="hooks-post-start",
                 )
@@ -800,12 +899,17 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
         )
         self.app.push_screen(picker, _on_closed)
 
-    def _open_compose_picker(self) -> None:
+    def _resolve_compose_stacks(self) -> list[DockerComposeStack]:
         compose_raw = self.query_one("#docker-compose", Input).value
+        if compose_raw == self._rendered_compose_stacks:
+            return [s.model_copy(deep=True) for s in self.compose_stacks]
+        return _parse_compose_stacks(compose_raw, existing_stacks=self.compose_stacks)
+
+    def _open_compose_picker(self) -> None:
         try:
-            existing = _parse_compose_stacks(compose_raw)
+            existing = self._resolve_compose_stacks()
         except ValueError:
-            existing = []
+            existing = [s.model_copy(deep=True) for s in self.compose_stacks]
         self.app.push_screen(
             ComposePickerModal(self.executor, existing),
             self._on_compose_picker_closed,
@@ -814,18 +918,38 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
     def _on_compose_picker_closed(self, result: list[DockerComposeStack] | None) -> None:
         if result is None:
             return
-        self.query_one("#docker-compose", Input).value = _format_compose_stacks(result)
+        self.compose_stacks = [s.model_copy(deep=True) for s in result]
+        self._rendered_compose_stacks = _format_compose_stacks(self.compose_stacks)
+        self.query_one("#docker-compose", Input).value = self._rendered_compose_stacks
         if result:
             self.query_one("#docker-enabled", Checkbox).value = True
 
+    def _resolve_hook_commands(self, stage: str) -> list[str]:
+        if stage == "pre_start":
+            raw = self.query_one("#hooks-pre-start", Input).value
+            if raw == self._rendered_pre_start:
+                return list(self.pre_start_hooks)
+            return _parse_hook_commands(raw)
+        raw = self.query_one("#hooks-post-start", Input).value
+        if raw == self._rendered_post_start:
+            return list(self.post_start_hooks)
+        return _parse_hook_commands(raw)
+
     def _open_hook_picker(self, stage: str) -> None:
         input_id = "#hooks-pre-start" if stage == "pre_start" else "#hooks-post-start"
-        current_cmds = _split_semicolon(self.query_one(input_id, Input).value)
+        current_cmds = self._resolve_hook_commands(stage)
 
         def _on_closed(result: list[str] | None) -> None:
             if result is None:
                 return
-            self.query_one(input_id, Input).value = "; ".join(result)
+            rendered = _format_hook_commands(result)
+            if stage == "pre_start":
+                self.pre_start_hooks = list(result)
+                self._rendered_pre_start = rendered
+            else:
+                self.post_start_hooks = list(result)
+                self._rendered_post_start = rendered
+            self.query_one(input_id, Input).value = rendered
 
         self.app.push_screen(HookPickerModal(stage, current_cmds), _on_closed)
 
@@ -836,20 +960,33 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
             error_widget.update("Error: Profile name must be non-empty and cannot contain spaces.")
             return
 
+        known_names = self.existing_names
+        if known_names is None:
+            app_profiles = getattr(self.app, "profiles_file", None)
+            if app_profiles is not None and hasattr(app_profiles, "profiles"):
+                known_names = set(app_profiles.profiles.keys())
+            else:
+                known_names = set()
+
+        if name in known_names and name != self.editing_name:
+            error_widget.update(
+                f"Error: Profile '{name}' already exists. Choose a unique profile name."
+            )
+            return
+
         desc = self.query_one("#profile-desc", Input).value.strip()
         sys_units = _split_csv(self.query_one("#systemd-system", Input).value)
         usr_units = _split_csv(self.query_one("#systemd-user", Input).value)
         stop_units = _split_csv(self.query_one("#systemd-stopped", Input).value)
         docker_enabled = self.query_one("#docker-enabled", Checkbox).value
         docker_containers = _split_csv(self.query_one("#docker-containers", Input).value)
-        compose_raw = self.query_one("#docker-compose", Input).value
         adb_enabled = self.query_one("#adb-enabled", Checkbox).value
         esp32_enabled = self.query_one("#esp32-enabled", Checkbox).value
-        pre_start = _split_semicolon(self.query_one("#hooks-pre-start", Input).value)
-        post_start = _split_semicolon(self.query_one("#hooks-post-start", Input).value)
+        pre_start = self._resolve_hook_commands("pre_start")
+        post_start = self._resolve_hook_commands("post_start")
 
         try:
-            compose_stacks = _parse_compose_stacks(compose_raw)
+            compose_stacks = self._resolve_compose_stacks()
             new_profile = ProfileConfig(
                 description=desc,
                 systemd=SystemdConfig(
@@ -865,14 +1002,15 @@ class ProfileEditorModal(ModalScreen[tuple[str, ProfileConfig] | None]):
                 android=AndroidConfig(adb_server=adb_enabled),
                 esp32_serial=Esp32SerialConfig(
                     enabled=esp32_enabled,
-                    check_dialout_group=True,
-                    stop_conflicting_services=True,
+                    check_dialout_group=self.initial_profile.esp32_serial.check_dialout_group,
+                    stop_conflicting_services=self.initial_profile.esp32_serial.stop_conflicting_services,
+                    ports_glob=list(self.initial_profile.esp32_serial.ports_glob),
                 ),
                 hooks=HooksConfig(
                     pre_start=pre_start,
                     post_start=post_start,
-                    pre_stop=self.initial_profile.hooks.pre_stop,
-                    post_stop=self.initial_profile.hooks.post_stop,
+                    pre_stop=list(self.initial_profile.hooks.pre_stop),
+                    post_stop=list(self.initial_profile.hooks.post_stop),
                 ),
             )
         except Exception as exc:

@@ -25,6 +25,11 @@ from srvp.templates import build_starter_profiles
 def test_normalize_unit_name() -> None:
     assert normalize_unit_name("postgresql") == "postgresql.service"
     assert normalize_unit_name("docker.socket") == "docker.socket"
+    assert normalize_unit_name("data.automount") == "data.automount"
+    assert normalize_unit_name("swapfile.swap") == "swapfile.swap"
+    assert normalize_unit_name("dev-sda.device") == "dev-sda.device"
+    assert normalize_unit_name("user.slice") == "user.slice"
+    assert normalize_unit_name("session-1.scope") == "session-1.scope"
     assert normalize_unit_name("  redis-server  ") == "redis-server.service"
     with pytest.raises(ValueError):
         normalize_unit_name("   ")
@@ -53,6 +58,16 @@ def test_profile_effective_units() -> None:
 def test_invalid_profile_name_rejected() -> None:
     with pytest.raises(ValueError, match="Invalid profile name"):
         ProfilesFile(profiles={"bad name with spaces": ProfileConfig()})
+
+
+def test_duplicate_compose_stack_names_rejected() -> None:
+    with pytest.raises(ValueError, match="Duplicate Docker Compose stack name 'backend'"):
+        DockerConfig(
+            compose_stacks=[
+                DockerComposeStack(name="backend", file="/tmp/a/docker-compose.yml"),
+                DockerComposeStack(name="backend", file="/tmp/b/docker-compose.yml"),
+            ]
+        )
 
 
 def test_save_and_load_profiles(tmp_path: Path) -> None:
@@ -103,3 +118,10 @@ def test_generate_polkit_rules() -> None:
     wheel_rules = generate_polkit_rules(starter, group="wheel")
     assert 'subject.isInGroup("wheel")' in wheel_rules
     assert 'subject.isInGroup("sudo")' not in wheel_rules
+
+    # Escaping of backslashes, quotes, and newlines in unit names and group
+    starter.profiles["web-db"].systemd.system.append(r"dev-disk\x2dby\x2duuid.service")
+    escaped_rules = generate_polkit_rules(starter, group='adm"\n//inject')
+    assert r'"dev-disk\\x2dby\\x2duuid.service"' in escaped_rules
+    assert r'subject.isInGroup("adm\"\n//inject")' in escaped_rules
+    assert "//inject" not in escaped_rules.splitlines()

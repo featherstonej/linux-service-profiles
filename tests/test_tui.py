@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from textual.widgets import DataTable, Input
 
-from srvp.config import load_profiles
+from srvp.config import DockerComposeStack, Esp32SerialConfig, load_profiles, save_profiles
 from srvp.executor import MockCommandExecutor
 from srvp.tui.app import SrvpApp
 from srvp.tui.editor import (
@@ -155,7 +155,12 @@ async def test_tui_profile_editor_create_and_delete(
         assert isinstance(app.screen, ProfileEditorModal)
         assert app.screen.query_one("#hooks-post-start", Input).value != ""
 
-        # Populate inputs inside ProfileEditorModal
+        # Populate inputs inside ProfileEditorModal; first verify duplicate name is rejected
+        app.screen.query_one("#profile-name", Input).value = "web-db"
+        app.screen._validate_and_save()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+
         app.screen.query_one("#profile-name", Input).value = "custom-iot"
         app.screen.query_one("#profile-desc", Input).value = "Custom IoT MQTT stack"
         app.screen.query_one("#systemd-system", Input).value = "mosquitto, postgresql"
@@ -189,6 +194,76 @@ async def test_tui_profile_editor_create_and_delete(
         app.screen._validate_and_save()
         await pilot.pause()
         assert "web-db-copy" in load_profiles(tmp_config_path).profiles
+
+        # Verify editing docker-dev preserves semicolon inside post_start hook losslessly,
+        # preserves Compose stack project_dir & services through both picker and editor,
+        # and preserves custom ESP32 overrides (check_dialout_group, stop_conflicting_services, ports_glob).
+        app.profiles_file.profiles["docker-dev"].docker.compose_stacks = [
+            DockerComposeStack(
+                name="api",
+                file="/tmp/proj/docker-compose.yml",
+                project_dir="/tmp/proj",
+                services=["web", "worker"],
+            )
+        ]
+        app.profiles_file.profiles["docker-dev"].esp32_serial = Esp32SerialConfig(
+            enabled=False,
+            check_dialout_group=False,
+            stop_conflicting_services=False,
+            ports_glob=["/dev/ttyACM0"],
+        )
+        save_profiles(app.profiles_file, tmp_config_path)
+
+        app.selected_profile = "docker-dev"
+        app.action_edit_selected()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+
+        # Open ComposePickerModal and click Apply without losing project_dir or services
+        app.screen._open_compose_picker()
+        await pilot.pause()
+        assert isinstance(app.screen, ComposePickerModal)
+        await pilot.click("#btn-compose-apply")
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+
+        app.screen._validate_and_save()
+        await pilot.pause()
+        saved_docker_dev = load_profiles(tmp_config_path).profiles["docker-dev"]
+        assert saved_docker_dev.hooks.post_start == [
+            "echo 'Docker daemon active; local host DB daemons stopped to avoid port clashes.'"
+        ]
+        assert len(saved_docker_dev.docker.compose_stacks) == 1
+        assert saved_docker_dev.docker.compose_stacks[0].project_dir == "/tmp/proj"
+        assert saved_docker_dev.docker.compose_stacks[0].services == ["web", "worker"]
+        assert saved_docker_dev.esp32_serial.check_dialout_group is False
+        assert saved_docker_dev.esp32_serial.stop_conflicting_services is False
+        assert saved_docker_dev.esp32_serial.ports_glob == ["/dev/ttyACM0"]
+
+        # Activate web-db-copy, verify active profile cannot be deleted while active,
+        # and verify renaming an active profile migrates state.active_profile
+        app.selected_profile = "web-db-copy"
+        app.action_switch_selected()
+        await pilot.pause()
+        assert app.state_manager.load().active_profile == "web-db-copy"
+
+        app.action_delete_selected()
+        await pilot.pause()
+        assert "web-db-copy" in load_profiles(tmp_config_path).profiles
+
+        app.action_edit_selected()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+        # First verify rename collision against an existing profile is rejected
+        app.screen.query_one("#profile-name", Input).value = "docker-dev"
+        app.screen._validate_and_save()
+        await pilot.pause()
+        assert isinstance(app.screen, ProfileEditorModal)
+
+        app.screen.query_one("#profile-name", Input).value = "web-db-renamed"
+        app.screen._validate_and_save()
+        await pilot.pause()
+        assert app.state_manager.load().active_profile == "web-db-renamed"
 
         # Test Snapshot Running ('m' / action_snapshot_running)
         mock_executor.active_system_units.add("postgresql.service")

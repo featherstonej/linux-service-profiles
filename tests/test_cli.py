@@ -81,8 +81,41 @@ def test_cli_init_list_switch_status_stop_validate_polkit(tmp_path: Path) -> Non
     assert r_val.exit_code == 0
     assert "Configuration is valid" in r_val.stdout
 
-    # 8. polkit-setup
+    # 8. polkit-setup (--output and stdout verbatim without line-wrapping)
     r_pk = runner.invoke(app, [*base_args, "polkit-setup", "--output", str(polkit_out)])
     assert r_pk.exit_code == 0
     assert polkit_out.exists()
-    assert "org.freedesktop.systemd1.manage-units" in polkit_out.read_text(encoding="utf-8")
+    file_rules = polkit_out.read_text(encoding="utf-8")
+    assert "org.freedesktop.systemd1.manage-units" in file_rules
+
+    r_pk_stdout = runner.invoke(app, [*base_args, "polkit-setup"])
+    assert r_pk_stdout.exit_code == 0
+    assert r_pk_stdout.stdout == file_rules
+
+
+def test_cli_mock_isolates_activation_state_from_real_state(tmp_path: Path) -> None:
+    from srvp.state import ManagedItem, StateManager
+
+    cfg = tmp_path / "profiles.yaml"
+    real_st = tmp_path / "state.json"
+    base_args = ["--config", str(cfg), "--state", str(real_st), "--mock"]
+
+    runner.invoke(app, [*base_args, "init"])
+
+    # Record a real activation in state.json
+    real_mgr = StateManager(real_st, mock=False)
+    real_mgr.record_activation(
+        "web-db",
+        [ManagedItem(provider="systemd_system", identifier="postgresql.service")],
+    )
+
+    # Run mock switch and mock stop; real state.json must remain untouched
+    r_sw = runner.invoke(app, [*base_args, "switch", "docker-dev"])
+    assert r_sw.exit_code == 0
+    assert (tmp_path / "mock_state.json").exists()
+    assert real_mgr.load().active_profile == "web-db"
+
+    r_stop = runner.invoke(app, [*base_args, "stop"])
+    assert r_stop.exit_code == 0
+    assert real_mgr.load().active_profile == "web-db"
+    assert len(real_mgr.load().active_items) == 1

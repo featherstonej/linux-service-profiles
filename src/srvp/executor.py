@@ -70,6 +70,7 @@ class RealCommandExecutor:
     def __init__(self, dry_run: bool = False) -> None:
         self._dry_run = dry_run
         self.history: list[CommandResult] = []
+        self._proc_cache: dict[int, psutil.Process] = {}
 
     @property
     def is_dry_run(self) -> bool:
@@ -96,12 +97,44 @@ class RealCommandExecutor:
             self.history.append(res)
             return res
 
+        resolved_cwd = str(Path(cwd).expanduser()) if cwd else None
         try:
+            if sudo and not shell and os.geteuid() != 0 and cmd and cmd[0] == "systemctl":
+                polkit_cmd = ["systemctl", "--no-ask-password", *cmd[1:]]
+                polkit_completed = subprocess.run(
+                    polkit_cmd,
+                    cwd=resolved_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                err_lower = polkit_completed.stderr.lower()
+                auth_denied = any(
+                    marker in err_lower
+                    for marker in (
+                        "interactive authentication required",
+                        "access denied",
+                        "not authorized",
+                        "authentication is required",
+                        "permission denied",
+                    )
+                )
+                if polkit_completed.returncode == 0 or not auth_denied:
+                    res = CommandResult(
+                        command=list(cmd),
+                        returncode=polkit_completed.returncode,
+                        stdout=polkit_completed.stdout.strip(),
+                        stderr=polkit_completed.stderr.strip(),
+                        dry_run=False,
+                    )
+                    self.history.append(res)
+                    return res
+
             if shell:
                 completed = subprocess.run(
                     full_cmd[0] if len(full_cmd) == 1 else shlex.join(full_cmd),
                     shell=True,
-                    cwd=cwd,
+                    cwd=resolved_cwd,
                     capture_output=True,
                     text=True,
                     timeout=60,
@@ -109,7 +142,7 @@ class RealCommandExecutor:
             else:
                 completed = subprocess.run(
                     full_cmd,
-                    cwd=cwd,
+                    cwd=resolved_cwd,
                     capture_output=True,
                     text=True,
                     timeout=60,
@@ -136,8 +169,13 @@ class RealCommandExecutor:
         if pid <= 0:
             return ProcessMetrics(pid=None)
         try:
-            proc = psutil.Process(pid)
-            cpu = proc.cpu_percent(interval=None)
+            proc = self._proc_cache.get(pid)
+            if proc is None or not proc.is_running():
+                proc = psutil.Process(pid)
+                self._proc_cache[pid] = proc
+                cpu = proc.cpu_percent(interval=0.01)
+            else:
+                cpu = proc.cpu_percent(interval=None)
             mem_bytes = proc.memory_info().rss
             return ProcessMetrics(
                 pid=pid,
@@ -145,6 +183,7 @@ class RealCommandExecutor:
                 memory_mb=round(mem_bytes / (1024 * 1024), 1),
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            self._proc_cache.pop(pid, None)
             return ProcessMetrics(pid=pid, cpu_percent=0.0, memory_mb=0.0)
 
     def glob_paths(self, pattern: str) -> list[str]:
@@ -174,6 +213,7 @@ class MockCommandExecutor:
     state_file: Path | None = None
     active_system_units: set[str] = field(default_factory=lambda: {"ModemManager.service"})
     active_user_units: set[str] = field(default_factory=set)
+    not_found_units: set[str] = field(default_factory=set)
     active_containers: set[str] = field(default_factory=set)
     active_compose_files: set[str] = field(default_factory=set)
     adb_running: bool = False
@@ -248,9 +288,16 @@ class MockCommandExecutor:
                         target_set.add(u)
                     stdout = f"Started {', '.join(units)}"
                 elif sub == "stop":
+                    missing = [
+                        u for u in units if u in self.not_found_units and u not in target_set
+                    ]
                     for u in units:
                         target_set.discard(u)
-                    stdout = f"Stopped {', '.join(units)}"
+                    if missing:
+                        returncode = 5
+                        stdout = ""
+                    else:
+                        stdout = f"Stopped {', '.join(units)}"
                 elif sub == "is-active" and units:
                     unit = units[0]
                     if unit in target_set:
@@ -263,7 +310,12 @@ class MockCommandExecutor:
                     unit = units[0]
                     pid = (abs(hash(unit)) % 8000 + 1000) if unit in target_set else 0
                     state_str = "active" if unit in target_set else "inactive"
-                    stdout = f"ActiveState={state_str}\nMainPID={pid}"
+                    load_str = (
+                        "not-found"
+                        if (unit in self.not_found_units and unit not in target_set)
+                        else "loaded"
+                    )
+                    stdout = f"LoadState={load_str}\nActiveState={state_str}\nMainPID={pid}"
                 elif sub == "list-unit-files":
                     if is_user:
                         mock_user_units = sorted(

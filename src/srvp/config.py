@@ -9,7 +9,38 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-VALID_UNIT_SUFFIXES = (".service", ".socket", ".target", ".timer", ".mount", ".path")
+VALID_UNIT_SUFFIXES = (
+    ".service",
+    ".socket",
+    ".device",
+    ".mount",
+    ".automount",
+    ".swap",
+    ".target",
+    ".path",
+    ".timer",
+    ".slice",
+    ".scope",
+)
+
+
+def resolve_compose_paths(
+    file_path: str,
+    project_dir: str | None = None,
+) -> tuple[str, str | None]:
+    """Expand '~' on Compose file_path and project_dir, resolving relative files against project_dir."""
+    expanded_proj: Path | None = (
+        Path(project_dir.strip()).expanduser() if (project_dir and project_dir.strip()) else None
+    )
+    expanded_file = Path(file_path.strip()).expanduser()
+    if not expanded_file.is_absolute() and expanded_proj is not None:
+        resolved_file = expanded_proj / expanded_file
+    else:
+        resolved_file = expanded_file
+    return (
+        str(resolved_file),
+        str(expanded_proj) if expanded_proj is not None else None,
+    )
 
 
 def normalize_unit_name(unit: str) -> str:
@@ -67,6 +98,13 @@ class DockerComposeStack(BaseModel):
         description="Optional subset of compose services to start (empty starts all).",
     )
 
+    @field_validator("name", "file", mode="before")
+    @classmethod
+    def _validate_non_empty_str(cls, v: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Compose stack name and file path must be non-empty strings.")
+        return v.strip()
+
 
 class DockerConfig(BaseModel):
     """Docker daemon, standalone container, and Compose stack configuration."""
@@ -83,6 +121,36 @@ class DockerConfig(BaseModel):
         default_factory=list,
         description="Docker Compose stacks to bring up (-d) and down.",
     )
+
+    @field_validator("containers", mode="before")
+    @classmethod
+    def _deduplicate_containers(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("Expected a list of container names.")
+        seen: list[str] = []
+        for item in v:
+            cleaned = str(item).strip()
+            if not cleaned:
+                raise ValueError("Container name cannot be empty.")
+            if cleaned not in seen:
+                seen.append(cleaned)
+        return seen
+
+    @field_validator("compose_stacks")
+    @classmethod
+    def _validate_unique_compose_stack_names(
+        cls, v: list[DockerComposeStack]
+    ) -> list[DockerComposeStack]:
+        seen_names: set[str] = set()
+        for stack in v:
+            if stack.name in seen_names:
+                raise ValueError(
+                    f"Duplicate Docker Compose stack name '{stack.name}': stack names within a profile must be unique."
+                )
+            seen_names.add(stack.name)
+        return v
 
 
 class AndroidConfig(BaseModel):
