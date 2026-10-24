@@ -387,10 +387,13 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         self.discovered: list[DiscoveredComposeFile] = [
             DiscoveredComposeFile(stack_name=s.name, file_path=s.file) for s in existing_stacks
         ]
-        self.existing_by_file: dict[str, DockerComposeStack] = {
-            s.file: s.model_copy(deep=True) for s in existing_stacks
+        self.existing_by_key: dict[tuple[str, str], DockerComposeStack] = {
+            (s.name, s.file): s.model_copy(deep=True) for s in existing_stacks
         }
-        self.selected_files: dict[str, str] = {s.file: s.name for s in existing_stacks}
+        self.existing_by_file: dict[str, DockerComposeStack] = {}
+        for s in existing_stacks:
+            self.existing_by_file.setdefault(s.file, s.model_copy(deep=True))
+        self.selected_keys: list[tuple[str, str]] = [(s.name, s.file) for s in existing_stacks]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="compose-picker-dialog"):
@@ -428,11 +431,19 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         self.run_worker(_worker, thread=True, exclusive=True, group="compose-discovery")
 
     def _on_compose_discovered(self, found: list[DiscoveredComposeFile]) -> None:
-        known_files = {d.file_path for d in found}
-        merged = list(found)
-        for fpath, name in self.selected_files.items():
-            if fpath not in known_files:
-                merged.insert(0, DiscoveredComposeFile(stack_name=name, file_path=fpath))
+        merged: list[DiscoveredComposeFile] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for name, fpath in self.selected_keys:
+            key = (name, fpath)
+            if key not in seen_keys:
+                merged.append(DiscoveredComposeFile(stack_name=name, file_path=fpath))
+                seen_keys.add(key)
+        selected_files_only = {fpath for _, fpath in self.selected_keys}
+        for d in found:
+            key = (d.stack_name, d.file_path)
+            if key not in seen_keys and d.file_path not in selected_files_only:
+                merged.append(d)
+                seen_keys.add(key)
         self.discovered = merged
         self._refresh_table()
 
@@ -440,11 +451,11 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         table = self.query_one("#compose-table", DataTable)
         prev_row = preserve_cursor if preserve_cursor is not None else table.cursor_row
         table.clear()
+        selected_set = set(self.selected_keys)
         for item in self.discovered:
-            is_sel = item.file_path in self.selected_files
+            is_sel = (item.stack_name, item.file_path) in selected_set
             badge = "[bold green]✓ Selected[/bold green]" if is_sel else "[dim]· Unselected[/dim]"
-            name = self.selected_files.get(item.file_path, item.stack_name)
-            table.add_row(badge, name, item.file_path)
+            table.add_row(badge, item.stack_name, item.file_path)
         if self.discovered and 0 <= prev_row < len(self.discovered):
             table.move_cursor(row=prev_row)
 
@@ -453,10 +464,11 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
         row_idx = table.cursor_row
         if 0 <= row_idx < len(self.discovered):
             item = self.discovered[row_idx]
-            if item.file_path in self.selected_files:
-                self.selected_files.pop(item.file_path, None)
+            key = (item.stack_name, item.file_path)
+            if key in self.selected_keys:
+                self.selected_keys.remove(key)
             else:
-                self.selected_files[item.file_path] = item.stack_name
+                self.selected_keys.append(key)
             self._refresh_table(preserve_cursor=row_idx)
 
     def action_cancel(self) -> None:
@@ -475,10 +487,13 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
             raw_path = path_in.value.strip()
             raw_name = name_in.value.strip() or "stack"
             if raw_path:
-                self.discovered.append(
-                    DiscoveredComposeFile(stack_name=raw_name, file_path=raw_path)
-                )
-                self.selected_files[raw_path] = raw_name
+                key = (raw_name, raw_path)
+                if not any((d.stack_name, d.file_path) == key for d in self.discovered):
+                    self.discovered.append(
+                        DiscoveredComposeFile(stack_name=raw_name, file_path=raw_path)
+                    )
+                if key not in self.selected_keys:
+                    self.selected_keys.append(key)
                 name_in.value = ""
                 path_in.value = ""
                 self._refresh_table(preserve_cursor=len(self.discovered) - 1)
@@ -486,8 +501,8 @@ class ComposePickerModal(ModalScreen[list[DockerComposeStack] | None]):
             self.dismiss(None)
         elif bid == "btn-compose-apply":
             result: list[DockerComposeStack] = []
-            for fpath, name in self.selected_files.items():
-                prior = self.existing_by_file.get(fpath)
+            for name, fpath in self.selected_keys:
+                prior = self.existing_by_key.get((name, fpath)) or self.existing_by_file.get(fpath)
                 if prior is not None:
                     result.append(
                         DockerComposeStack(

@@ -101,9 +101,11 @@ class RealCommandExecutor:
         try:
             if sudo and not shell and os.geteuid() != 0 and cmd and cmd[0] == "systemctl":
                 polkit_cmd = ["systemctl", "--no-ask-password", *cmd[1:]]
+                polkit_env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
                 polkit_completed = subprocess.run(
                     polkit_cmd,
                     cwd=resolved_cwd,
+                    env=polkit_env,
                     capture_output=True,
                     text=True,
                     timeout=60,
@@ -469,5 +471,10 @@ class MockCommandExecutor:
 
     def file_exists(self, path: str) -> bool:
         if path in self.existing_files:
+            return True
+        resolved = str(Path(path).expanduser().resolve())
+        if resolved in self.existing_files or any(
+            str(Path(p).expanduser().resolve()) == resolved for p in self.existing_files
+        ):
             return True
         return Path(path).expanduser().exists()

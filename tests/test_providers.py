@@ -195,26 +195,37 @@ def test_systemd_stop_ignores_not_found_units_and_discovery_parses_failed_marker
 
 
 def test_real_executor_polkit_without_unconditional_sudo(monkeypatch: object) -> None:
+    import os
     import subprocess
     from types import SimpleNamespace
 
     import pytest
 
     from srvp.executor import RealCommandExecutor
+    from srvp.providers.systemd import _parse_systemctl_show
+
+    # ActiveState=reloading is treated as active
+    assert _parse_systemctl_show("ActiveState=reloading\nMainPID=1234\n") == (True, 1234)
 
     mp = pytest.MonkeyPatch()
     calls: list[list[str]] = []
+    envs: list[dict[str, str]] = []
 
-    def fake_run_polkit_ok(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+    def fake_run_polkit_ok(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append(list(cmd))
+        env_arg = kwargs.get("env")
+        if isinstance(env_arg, dict):
+            envs.append(env_arg)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    mp.setattr(os, "geteuid", lambda: 1000)
     mp.setattr(subprocess, "run", fake_run_polkit_ok)
     try:
         real_exec = RealCommandExecutor(dry_run=False)
         res = real_exec.run(["systemctl", "start", "postgresql.service"], sudo=True)
         assert res.returncode == 0
-        # Should succeed via systemctl --no-ask-password without calling sudo
+        # Should succeed via systemctl --no-ask-password without calling sudo, with C locale
         assert calls == [["systemctl", "--no-ask-password", "start", "postgresql.service"]]
+        assert envs and envs[0].get("LC_ALL") == "C"
     finally:
         mp.undo()

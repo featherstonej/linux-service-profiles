@@ -137,8 +137,10 @@ class DockerComposeProvider(ServiceProvider):
             item.metadata.get("file", ""),
             item.metadata.get("project_dir"),
         )
+        services_csv = item.metadata.get("services", "")
+        services = [s for s in services_csv.split(",") if s]
         res = executor.run(
-            ["docker", "compose", "-f", compose_file, "ps", "--status", "running", "-q"],
+            ["docker", "compose", "-f", compose_file, "ps", "--status", "running", "-q", *services],
             cwd=project_dir,
             sudo=False,
             mutating=False,
@@ -154,6 +156,20 @@ class DockerComposeProvider(ServiceProvider):
             memory_mb=0.0,
             detail=f"compose ({compose_file})",
         )
+
+    def has_running_containers(self, item: ManagedItem, executor: CommandExecutor) -> bool:
+        """Return True if any container belonging to `item`'s Compose file is running."""
+        compose_file, project_dir = resolve_compose_paths(
+            item.metadata.get("file", ""),
+            item.metadata.get("project_dir"),
+        )
+        res = executor.run(
+            ["docker", "compose", "-f", compose_file, "ps", "--status", "running", "-q"],
+            cwd=project_dir,
+            sudo=False,
+            mutating=False,
+        )
+        return res.returncode == 0 and bool(res.stdout.strip())
 
     def start_items(
         self, items: list[ManagedItem], executor: CommandExecutor

@@ -204,7 +204,13 @@ async def test_tui_profile_editor_create_and_delete(
                 file="/tmp/proj/docker-compose.yml",
                 project_dir="/tmp/proj",
                 services=["web", "worker"],
-            )
+            ),
+            DockerComposeStack(
+                name="metrics",
+                file="/tmp/proj/docker-compose.yml",
+                project_dir="/tmp/proj",
+                services=["prometheus"],
+            ),
         ]
         app.profiles_file.profiles["docker-dev"].esp32_serial = Esp32SerialConfig(
             enabled=False,
@@ -219,7 +225,7 @@ async def test_tui_profile_editor_create_and_delete(
         await pilot.pause()
         assert isinstance(app.screen, ProfileEditorModal)
 
-        # Open ComposePickerModal and click Apply without losing project_dir or services
+        # Open ComposePickerModal and click Apply without losing project_dir, services, or duplicate-file stacks
         app.screen._open_compose_picker()
         await pilot.pause()
         assert isinstance(app.screen, ComposePickerModal)
@@ -233,9 +239,11 @@ async def test_tui_profile_editor_create_and_delete(
         assert saved_docker_dev.hooks.post_start == [
             "echo 'Docker daemon active; local host DB daemons stopped to avoid port clashes.'"
         ]
-        assert len(saved_docker_dev.docker.compose_stacks) == 1
+        assert len(saved_docker_dev.docker.compose_stacks) == 2
         assert saved_docker_dev.docker.compose_stacks[0].project_dir == "/tmp/proj"
         assert saved_docker_dev.docker.compose_stacks[0].services == ["web", "worker"]
+        assert saved_docker_dev.docker.compose_stacks[1].name == "metrics"
+        assert saved_docker_dev.docker.compose_stacks[1].services == ["prometheus"]
         assert saved_docker_dev.esp32_serial.check_dialout_group is False
         assert saved_docker_dev.esp32_serial.stop_conflicting_services is False
         assert saved_docker_dev.esp32_serial.ports_glob == ["/dev/ttyACM0"]

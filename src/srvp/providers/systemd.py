@@ -39,7 +39,7 @@ def _parse_systemctl_show(output: str) -> tuple[bool, int | None]:
     for line in output.splitlines():
         if line.startswith("ActiveState="):
             val = line.split("=", 1)[1].strip()
-            active = val == "active"
+            active = val in ("active", "reloading")
         elif line.startswith("MainPID="):
             try:
                 parsed_pid = int(line.split("=", 1)[1].strip())
@@ -142,7 +142,16 @@ class SystemdSystemProvider(ServiceProvider):
         batch_records: dict[str, ActionRecord] = {}
         if present_items:
             unit_names = [it.identifier for it in present_items]
-            res = executor.run(["systemctl", "stop", *unit_names], sudo=True, mutating=True)
+            extra_socket = (
+                "docker.service" in unit_names
+                and "docker.socket" not in unit_names
+                and (
+                    executor.is_dry_run
+                    or not _is_unit_confirmed_not_found("docker.socket", executor, user=False)
+                )
+            )
+            cmd_units = [*unit_names, "docker.socket"] if extra_socket else unit_names
+            res = executor.run(["systemctl", "stop", *cmd_units], sudo=True, mutating=True)
             if res.returncode == 0 or res.dry_run:
                 outcomes = [True] * len(present_items)
             elif len(present_items) > 1:

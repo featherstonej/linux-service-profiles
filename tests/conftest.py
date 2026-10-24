@@ -16,7 +16,7 @@ from srvp.templates import build_starter_profiles
 def tmp_config_path(tmp_path: Path) -> Path:
     """Return an isolated temporary path for profiles.yaml initialized with starter templates."""
     cfg_path = tmp_path / "config" / "profiles.yaml"
-    save_profiles(build_starter_profiles(), cfg_path)
+    save_profiles(build_starter_profiles(redis_unit="redis-server.service"), cfg_path)
     return cfg_path
 
 
@@ -41,4 +41,4 @@ def mock_executor(tmp_path: Path) -> MockCommandExecutor:
 @pytest.fixture()
 def starter_profiles() -> ProfilesFile:
     """Return a fresh copy of the starter ProfilesFile."""
-    return build_starter_profiles()
+    return build_starter_profiles(redis_unit="redis-server.service")

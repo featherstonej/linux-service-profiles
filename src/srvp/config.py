@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -28,15 +29,18 @@ def resolve_compose_paths(
     file_path: str,
     project_dir: str | None = None,
 ) -> tuple[str, str | None]:
-    """Expand '~' on Compose file_path and project_dir, resolving relative files against project_dir."""
+    """Expand '~' and resolve Compose file_path and project_dir to absolute paths."""
     expanded_proj: Path | None = (
-        Path(project_dir.strip()).expanduser() if (project_dir and project_dir.strip()) else None
+        Path(project_dir.strip()).expanduser().resolve()
+        if (project_dir and project_dir.strip())
+        else None
     )
     expanded_file = Path(file_path.strip()).expanduser()
-    if not expanded_file.is_absolute() and expanded_proj is not None:
-        resolved_file = expanded_proj / expanded_file
+    if not expanded_file.is_absolute():
+        base_dir = expanded_proj if expanded_proj is not None else Path.cwd()
+        resolved_file = (base_dir / expanded_file).resolve()
     else:
-        resolved_file = expanded_file
+        resolved_file = expanded_file.resolve()
     return (
         str(resolved_file),
         str(expanded_proj) if expanded_proj is not None else None,
@@ -225,12 +229,20 @@ class ProfileConfig(BaseModel):
         return units
 
     def effective_ensure_stopped_units(self) -> list[str]:
-        """Return system units that must be stopped, including ESP32 conflict daemons if enabled."""
+        """Return system units that must be stopped, including ESP32 conflict daemons and docker.socket."""
         stopped = list(self.systemd.ensure_stopped)
+        eff_system = self.effective_system_units()
         if self.esp32_serial.enabled and self.esp32_serial.stop_conflicting_services:
             for conflict in ("brltty.service", "ModemManager.service"):
-                if conflict not in stopped and conflict not in self.systemd.system:
+                if conflict not in stopped and conflict not in eff_system:
                     stopped.append(conflict)
+        if (
+            "docker.service" in stopped
+            and "docker.service" not in eff_system
+            and "docker.socket" not in stopped
+            and "docker.socket" not in eff_system
+        ):
+            stopped.append("docker.socket")
         return stopped
 
 
@@ -281,7 +293,7 @@ def load_profiles(path: Path | str | None = None) -> ProfilesFile:
 
 
 def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
-    """Serialize and save ProfilesFile to YAML on disk."""
+    """Serialize and save ProfilesFile to YAML on disk atomically."""
     resolved = resolve_config_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     dumped_dict = config.model_dump(mode="json")
@@ -295,5 +307,22 @@ def save_profiles(config: ProfilesFile, path: Path | str | None = None) -> Path:
         "# Linux Service Profiles (srvp) Configuration\n"
         "# Customize profiles below or edit via the interactive TUI ('srvp ui').\n\n"
     )
-    resolved.write_text(header + yaml_text, encoding="utf-8")
+    content = header + yaml_text
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=resolved.parent,
+        prefix=f".{resolved.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+        try:
+            tmp_file.write(content)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    os.replace(tmp_path, resolved)
     return resolved

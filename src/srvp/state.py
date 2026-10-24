@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -114,22 +115,36 @@ class StateManager:
                         self._lock_handle = None
 
     def load(self) -> AppState:
-        """Load state from disk, returning an empty AppState if not present or corrupted."""
+        """Load state from disk, returning an empty AppState only if the file does not exist."""
         if not self.path.exists():
             return AppState()
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             return AppState.model_validate(raw)
-        except Exception:
-            return AppState()
+        except Exception as exc:
+            raise ValueError(f"Corrupt or unreadable state file '{self.path}': {exc}") from exc
 
     def save(self, state: AppState) -> Path:
-        """Persist state to disk."""
+        """Persist state to disk atomically via a temporary file."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(state.model_dump(mode="json"), indent=2) + "\n",
+        payload = json.dumps(state.model_dump(mode="json"), indent=2) + "\n"
+        with tempfile.NamedTemporaryFile(
+            mode="w",
             encoding="utf-8",
-        )
+            dir=self.path.parent,
+            prefix=f".{self.path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            try:
+                tmp_file.write(payload)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        os.replace(tmp_path, self.path)
         return self.path
 
     def record_activation(
@@ -154,8 +169,9 @@ class StateManager:
 
     def rename_active_profile(self, old_name: str, new_name: str) -> AppState:
         """Migrate active_profile when the currently active profile is renamed."""
-        state = self.load()
-        if state.active_profile == old_name:
-            state.active_profile = new_name
-            self.save(state)
-        return state
+        with self.transition_lock():
+            state = self.load()
+            if state.active_profile == old_name:
+                state.active_profile = new_name
+                self.save(state)
+            return state

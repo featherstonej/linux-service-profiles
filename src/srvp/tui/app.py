@@ -39,9 +39,18 @@ class ProfileListItem(ListItem):
         self.profile_name = profile_name
         self.is_active = is_active
 
-    def compose(self) -> ComposeResult:
+    def _format_label(self) -> str:
         badge = " [bold green]● ACTIVE[/bold green]" if self.is_active else ""
-        yield Label(f"{self.profile_name}{badge}")
+        return f"{self.profile_name}{badge}"
+
+    def compose(self) -> ComposeResult:
+        yield Label(self._format_label())
+
+    def set_active(self, is_active: bool) -> None:
+        if self.is_active != is_active:
+            self.is_active = is_active
+            for lbl in self.query(Label):
+                lbl.update(self._format_label())
 
 
 class SrvpApp(App[None]):
@@ -187,20 +196,29 @@ class SrvpApp(App[None]):
         ):
             self.refresh_views()
 
-    def _update_active_banner(self) -> None:
-        state = self.state_manager.load()
-        active_name = state.active_profile
+    def _load_active_profile_safe(self) -> str | None:
+        try:
+            return self.state_manager.load().active_profile
+        except Exception:
+            return None
+
+    def _sync_active_profile_indicators(self, active_name: str | None) -> None:
         auto_str = "[green]ON[/green]" if self.auto_refresh_enabled else "[yellow]PAUSED[/yellow]"
         banner = self.query_one("#active-banner", Static)
         active_part = (
             f"[bold green]{active_name}[/bold green]" if active_name else "[dim]None (Idle)[/dim]"
         )
         banner.update(f"Active: {active_part} | Auto: {auto_str}")
+        list_view = self.query_one("#profile-list", ListView)
+        for item in list_view.query(ProfileListItem):
+            item.set_active(item.profile_name == active_name)
+
+    def _update_active_banner(self) -> None:
+        self._sync_active_profile_indicators(self._load_active_profile_safe())
 
     def _rebuild_profile_list(self) -> None:
-        state = self.state_manager.load()
-        active_name = state.active_profile
-        self._update_active_banner()
+        active_name = self._load_active_profile_safe()
+        self._sync_active_profile_indicators(active_name)
 
         list_view = self.query_one("#profile-list", ListView)
         list_view.clear()
@@ -226,9 +244,18 @@ class SrvpApp(App[None]):
         )
 
         def _worker() -> None:
-            plan = self.engine.compute_transition_plan(selected) if prof is not None else None
-            statuses = self.engine.get_profile_statuses(selected)
-            self.call_from_thread(self._apply_refreshed_views, selected, prof, plan, statuses)
+            active_name = self._load_active_profile_safe()
+            try:
+                plan = self.engine.compute_transition_plan(selected) if prof is not None else None
+            except Exception:
+                plan = None
+            try:
+                statuses = self.engine.get_profile_statuses(selected)
+            except Exception:
+                statuses = []
+            self.call_from_thread(
+                self._apply_refreshed_views, selected, prof, plan, statuses, active_name
+            )
 
         self.run_worker(_worker, thread=True, exclusive=True, group="status-refresh")
 
@@ -238,8 +265,12 @@ class SrvpApp(App[None]):
         prof: ProfileConfig | None,
         plan: TransitionPlan | None,
         statuses: list[ServiceStatus],
+        active_name: str | None = None,
     ) -> None:
         """Apply refreshed transition preview and status rows on the UI thread."""
+        self._sync_active_profile_indicators(active_name)
+        if selected != self.selected_profile:
+            return
         details = self.query_one("#profile-details", Static)
         if selected and prof is not None and plan is not None:
             to_start = ", ".join(it.identifier for it in plan.items_to_start) or "none"
@@ -453,6 +484,10 @@ class SrvpApp(App[None]):
         log.write(f"[cyan]Live auto-refresh {state_word}.[/cyan]")
 
     def action_new_profile(self) -> None:
+        if self._transition_in_progress:
+            log = self.query_one("#action-log", RichLog)
+            log.write("[yellow]A transition is already in progress; please wait.[/yellow]")
+            return
         self.push_screen(
             ProfileEditorModal(
                 executor=self.executor,
@@ -463,6 +498,10 @@ class SrvpApp(App[None]):
         )
 
     def action_clone_selected(self) -> None:
+        if self._transition_in_progress:
+            log = self.query_one("#action-log", RichLog)
+            log.write("[yellow]A transition is already in progress; please wait.[/yellow]")
+            return
         if not self.selected_profile or self.selected_profile not in self.profiles_file.profiles:
             return
         orig_name = self.selected_profile
@@ -492,6 +531,10 @@ class SrvpApp(App[None]):
         self.run_worker(_worker, thread=True, exclusive=True, group="snapshot")
 
     def _open_snapshot_editor(self, snap_prof: ProfileConfig) -> None:
+        if self._transition_in_progress:
+            log = self.query_one("#action-log", RichLog)
+            log.write("[yellow]A transition is already in progress; please wait.[/yellow]")
+            return
         self.push_screen(
             ProfileEditorModal(
                 "snapshot-profile",
@@ -506,8 +549,13 @@ class SrvpApp(App[None]):
     def _on_profile_saved_new(self, result: tuple[str, ProfileConfig] | None) -> None:
         if result is None:
             return
-        name, new_prof = result
         log = self.query_one("#action-log", RichLog)
+        if self._transition_in_progress:
+            log.write(
+                "[yellow]A transition is in progress; cannot save profile changes right now.[/yellow]"
+            )
+            return
+        name, new_prof = result
         if name in self.profiles_file.profiles:
             log.write(
                 f"[bold red]Cannot create profile '{name}': a profile with that name already exists.[/bold red]"
@@ -521,6 +569,10 @@ class SrvpApp(App[None]):
         log.write(f"[bold green]Saved profile '{name}' to {self.config_path}[/bold green]")
 
     def action_edit_selected(self) -> None:
+        if self._transition_in_progress:
+            log = self.query_one("#action-log", RichLog)
+            log.write("[yellow]A transition is already in progress; please wait.[/yellow]")
+            return
         if not self.selected_profile or self.selected_profile not in self.profiles_file.profiles:
             return
         orig_name = self.selected_profile
@@ -529,8 +581,13 @@ class SrvpApp(App[None]):
         def _on_edited(result: tuple[str, ProfileConfig] | None) -> None:
             if result is None:
                 return
-            new_name, updated_prof = result
             log = self.query_one("#action-log", RichLog)
+            if self._transition_in_progress:
+                log.write(
+                    "[yellow]A transition is in progress; cannot save profile changes right now.[/yellow]"
+                )
+                return
+            new_name, updated_prof = result
             if new_name != orig_name and new_name in self.profiles_file.profiles:
                 log.write(
                     f"[bold red]Cannot rename '{orig_name}' to '{new_name}': profile '{new_name}' already exists.[/bold red]"
@@ -559,10 +616,20 @@ class SrvpApp(App[None]):
         )
 
     def action_delete_selected(self) -> None:
+        if self._transition_in_progress:
+            log = self.query_one("#action-log", RichLog)
+            log.write("[yellow]A transition is already in progress; please wait.[/yellow]")
+            return
         if not self.selected_profile or self.selected_profile not in self.profiles_file.profiles:
             return
         target = self.selected_profile
-        if self.state_manager.load().active_profile == target:
+        try:
+            active_now = self.state_manager.load().active_profile
+        except Exception as exc:
+            log = self.query_one("#action-log", RichLog)
+            log.write(f"[bold red]Cannot verify active profile state: {exc}[/bold red]")
+            return
+        if active_now == target:
             log = self.query_one("#action-log", RichLog)
             log.write(
                 f"[bold red]Cannot delete active profile '{target}'. "
@@ -574,7 +641,17 @@ class SrvpApp(App[None]):
             if not confirmed:
                 return
             log = self.query_one("#action-log", RichLog)
-            if self.state_manager.load().active_profile == target:
+            if self._transition_in_progress:
+                log.write(
+                    "[yellow]A transition is in progress; cannot delete profile right now.[/yellow]"
+                )
+                return
+            try:
+                current_active = self.state_manager.load().active_profile
+            except Exception as exc:
+                log.write(f"[bold red]Cannot verify active profile state: {exc}[/bold red]")
+                return
+            if current_active == target:
                 log.write(
                     f"[bold red]Cannot delete active profile '{target}'. "
                     "Stop it first (x) or switch to another profile before deleting.[/bold red]"

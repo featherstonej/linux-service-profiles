@@ -189,7 +189,11 @@ def cmd_list(ctx: typer.Context) -> None:
     """List all configured profiles and highlight the currently active profile."""
     cli_ctx: CliContext = ctx.obj
     profiles_file = cli_ctx.load_or_fail()
-    state = StateManager(cli_ctx.state_path).load()
+    try:
+        state = StateManager(cli_ctx.state_path).load()
+    except ValueError as exc:
+        console.print(f"[bold red]State error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     table = Table(title="Configured Linux Service Profiles")
     table.add_column("Profile", style="bold cyan")
@@ -279,7 +283,11 @@ def cmd_switch(
         state_manager=StateManager(cli_ctx.state_path),
         executor=cli_ctx.build_executor(override_dry_run=dry_run),
     )
-    res = engine.switch_profile(profile_name)
+    try:
+        res = engine.switch_profile(profile_name)
+    except ValueError as exc:
+        console.print(f"[bold red]State error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
     _render_transition_result(res)
     if not res.success:
         raise typer.Exit(code=1)
@@ -301,7 +309,11 @@ def cmd_stop(
         state_manager=StateManager(cli_ctx.state_path),
         executor=cli_ctx.build_executor(override_dry_run=dry_run),
     )
-    res = engine.stop_all()
+    try:
+        res = engine.stop_all()
+    except ValueError as exc:
+        console.print(f"[bold red]State error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
     _render_transition_result(res)
     if not res.success:
         raise typer.Exit(code=1)
@@ -324,7 +336,11 @@ def cmd_status(
     cli_ctx: CliContext = ctx.obj
     profiles_file = cli_ctx.load_or_fail()
     state_mgr = StateManager(cli_ctx.state_path)
-    state = state_mgr.load()
+    try:
+        state = state_mgr.load()
+    except ValueError as exc:
+        console.print(f"[bold red]State error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     engine = ProfileEngine(
         config=profiles_file,

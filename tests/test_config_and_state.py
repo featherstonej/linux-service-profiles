@@ -72,7 +72,7 @@ def test_duplicate_compose_stack_names_rejected() -> None:
 
 def test_save_and_load_profiles(tmp_path: Path) -> None:
     cfg_path = tmp_path / "profiles.yaml"
-    starter = build_starter_profiles()
+    starter = build_starter_profiles(redis_unit="redis-server.service")
     save_profiles(starter, cfg_path)
     loaded = load_profiles(cfg_path)
     assert set(loaded.profiles.keys()) == set(starter.profiles.keys())
@@ -82,7 +82,7 @@ def test_save_and_load_profiles(tmp_path: Path) -> None:
     ]
 
 
-def test_state_manager_roundtrip(tmp_path: Path) -> None:
+def test_state_manager_roundtrip_and_corrupt_detection(tmp_path: Path) -> None:
     mgr = StateManager(tmp_path / "state.json")
     initial = mgr.load()
     assert initial.active_profile is None
@@ -101,6 +101,11 @@ def test_state_manager_roundtrip(tmp_path: Path) -> None:
     assert len(reloaded.active_items) == 2
     assert reloaded.active_items[0].key == ("systemd_system", "postgresql.service")
 
+    # Corrupt state.json must raise ValueError instead of silently returning empty state
+    (tmp_path / "state.json").write_text("{corrupt json", encoding="utf-8")
+    with pytest.raises(ValueError, match="Corrupt or unreadable state file"):
+        mgr.load()
+
 
 def test_generate_polkit_rules() -> None:
     starter = build_starter_profiles(redis_unit="redis.service")
@@ -113,6 +118,7 @@ def test_generate_polkit_rules() -> None:
     assert 'subject.isInGroup("wheel")' in default_rules
     assert '"postgresql.service"' in default_rules
     assert '"docker.service"' in default_rules
+    assert '"docker.socket"' in default_rules
 
     # Explicit group override
     wheel_rules = generate_polkit_rules(starter, group="wheel")

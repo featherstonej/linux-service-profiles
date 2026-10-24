@@ -253,3 +253,65 @@ def test_stop_uses_activation_snapshot_and_compose_resolves_relative_paths(
         )
     ]
     assert engine.validate_config() == []
+
+
+def test_failed_start_preserves_previously_tracked_and_partially_started_items(
+    starter_profiles: ProfilesFile,
+    state_manager: StateManager,
+    mock_executor: MockCommandExecutor,
+) -> None:
+    from srvp.config import SystemdConfig
+
+    # Profile A starts postgresql.service
+    starter_profiles.profiles["prof-a"] = ProfileConfig(
+        systemd=SystemdConfig(system=["postgresql.service"])
+    )
+    # Profile B keeps postgresql.service and adds compose stack 'partial-stack'
+    starter_profiles.profiles["prof-b"] = ProfileConfig(
+        systemd=SystemdConfig(system=["postgresql.service"]),
+        docker=DockerConfig(
+            enabled=True,
+            compose_stacks=[
+                DockerComposeStack(
+                    name="partial-stack",
+                    file="/tmp/partial/compose.yml",
+                    services=["api", "worker"],
+                )
+            ],
+        ),
+    )
+    engine = ProfileEngine(starter_profiles, state_manager, mock_executor)
+    assert engine.switch_profile("prof-a").success is True
+
+    orig_run = mock_executor.run
+
+    def fail_compose_up_after_partial_start(
+        cmd: list[str],
+        *,
+        sudo: bool = False,
+        cwd: str | None = None,
+        shell: bool = False,
+        mutating: bool = True,
+    ) -> CommandResult:
+        if cmd[:2] == ["docker", "compose"] and "up" in cmd:
+            # Simulate partial container creation before compose up exits non-zero
+            mock_executor.active_compose_files.add("/tmp/partial/compose.yml")
+            res = CommandResult(
+                command=cmd,
+                returncode=1,
+                stdout="",
+                stderr="worker container failed to start",
+                dry_run=False,
+            )
+            mock_executor.history.append(res)
+            return res
+        return orig_run(cmd, sudo=sudo, cwd=cwd, shell=shell, mutating=mutating)
+
+    mock_executor.run = fail_compose_up_after_partial_start  # type: ignore[method-assign]
+    res_b = engine.switch_profile("prof-b")
+    assert res_b.success is False
+    saved = state_manager.load()
+    saved_keys = {it.key for it in saved.active_items}
+    # Both previously active postgresql.service and partially started compose stack remain tracked
+    assert ("systemd_system", "postgresql.service") in saved_keys
+    assert ("docker_compose", "partial-stack") in saved_keys

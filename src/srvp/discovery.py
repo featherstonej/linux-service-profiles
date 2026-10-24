@@ -13,7 +13,8 @@ from srvp.config import (
 )
 from srvp.executor import CommandExecutor, MockCommandExecutor
 
-# Low-level OS plumbing prefixes and exact unit names hidden by default in the curated view.
+# Low-level OS plumbing, network, display-manager, and hardware-daemon prefixes
+# hidden by default in the curated view and excluded from automatic snapshots.
 CORE_OS_PREFIXES = (
     "systemd-",
     "dbus",
@@ -47,11 +48,32 @@ CORE_OS_PREFIXES = (
     "colord",
     "fwupd",
     "packagekit",
-    " switcheroo-control",
+    "switcheroo-control",
+    "power-profiles-daemon",
     "thermald",
     "wpa_supplicant",
-    "NetworkManager-wait-online",
+    "networkmanager",
     "networkd-dispatcher",
+    "iwd",
+    "connman",
+    "modemmanager",
+    "brltty",
+    "bluetooth",
+    "cups",
+    "avahi-daemon",
+    "gdm",
+    "sddm",
+    "lightdm",
+    "greetd",
+    "lxdm",
+    "xdm",
+    "ly.",
+    "display-manager",
+    "seatd",
+    "logind",
+    "sshd",
+    "ssh.",
+    "ssh@",
     "sysstat",
     "rsyslog",
     "cron",

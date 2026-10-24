@@ -122,6 +122,16 @@ class ProfileEngine:
                 if item.resource_key not in desired_rkeys:
                     items_to_stop_map.setdefault(item.resource_key, item)
 
+        # If docker.service is being stopped, also stop docker.socket so socket activation
+        # cannot re-trigger docker.service on subsequent status checks.
+        docker_svc_rkey = ("systemd_system", "docker.service", ())
+        docker_sock_item = ManagedItem(provider="systemd_system", identifier="docker.socket")
+        if (
+            docker_svc_rkey in items_to_stop_map
+            and docker_sock_item.resource_key not in desired_rkeys
+        ):
+            items_to_stop_map.setdefault(docker_sock_item.resource_key, docker_sock_item)
+
         if prev_name != target_profile_name:
             if prev_profile is not None:
                 pre_stop = list(prev_profile.hooks.pre_stop)
@@ -247,6 +257,7 @@ class ProfileEngine:
                     continue
                 prov_recs = provider.start_items(prov_start_items, self.executor)
                 records.extend(prov_recs)
+                attempted_ids = {r.identifier for r in prov_recs}
                 outcomes = self._match_item_outcomes(
                     prov_start_items,
                     prov_recs,
@@ -256,7 +267,13 @@ class ProfileEngine:
                     if ok:
                         tracked_items[it.resource_key] = it
                     else:
-                        tracked_items.pop(it.resource_key, None)
+                        if (
+                            it.resource_key not in tracked_items
+                            and it.identifier in attempted_ids
+                            and not self.executor.is_dry_run
+                            and self._is_item_active_after_failed_start(provider, it)
+                        ):
+                            tracked_items[it.resource_key] = it
                         start_phase_failed = True
                 if any(not r.success for r in prov_recs) or start_phase_failed:
                     start_phase_failed = True
@@ -309,6 +326,14 @@ class ProfileEngine:
             records=records,
             dry_run=self.executor.is_dry_run,
         )
+
+    def _is_item_active_after_failed_start(
+        self, provider: ServiceProvider, item: ManagedItem
+    ) -> bool:
+        """Check whether a failed start attempt still left any part of `item` running."""
+        if isinstance(provider, DockerComposeProvider):
+            return provider.has_running_containers(item, self.executor)
+        return provider.get_status(item, self.executor).active
 
     def switch_profile(self, target_profile_name: str) -> TransitionResult:
         """Compute and execute an exclusive switch to `target_profile_name`."""

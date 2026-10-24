@@ -17,6 +17,8 @@ def generate_polkit_rules(config: ProfilesFile, group: str | None = None) -> str
     for profile in config.profiles.values():
         managed_units.update(profile.effective_system_units())
         managed_units.update(profile.effective_ensure_stopped_units())
+    if "docker.service" in managed_units:
+        managed_units.add("docker.socket")
 
     sorted_units = sorted(managed_units)
     units_js_array = ",\n        ".join(json.dumps(u) for u in sorted_units)
